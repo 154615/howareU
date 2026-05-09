@@ -3,100 +3,120 @@
 #define MODBUS_CFG_H
 
 #include <iostream>
+#include <string>
 #include <libmodbus/modbus.h>
 
+// =========================================================================
+// modbus_cfg.h —— Modbus TCP 通讯底层封装(Plc_interact 类)
+// -------------------------------------------------------------------------
+// 模块定位:
+//   纯通讯层. 单次读 / 单次连接检查 / 句柄管理. 不持有线程, 不死循环.
+//   节拍由调用方(PlcIoManager) 控制.
+//
+// 历史变更:
+//   - 2026-05  与 PlcIoManager 配套大改:
+//              * 删除 8 个语义级 send_xxx 函数(语义由 PlcSend:: 常量表 + Buffer 接管)
+//              * 删除 send_heart_beat 死循环(心跳由 PlcIoManager 自己维护)
+//              * get_modbus_data / connect_check 从死循环改为单次执行 + 返回 bool
+//              * 调用方需自己控制循环节拍(PlcIoManager::RcvLoop / SendLoop)
+//
+// 与 plc_register_map.h 的分工:
+//   - modbus_cfg.h        通讯类 + 连接信息(IP/端口/总数), 不知"语义"
+//   - plc_register_map.h  寄存器下标 → 业务语义, 不知"通讯"
+//
+// 调用约定(配套 PlcIoManager):
+//   - 业务侧不直接持有 Plc_interact, 只通过 PlcReceiveBuffer / PlcSendBuffer
+//     间接读写
+//   - PlcIoManager 在它的两条 IO 线程里:
+//       * 周期性调 get_modbus_data() 读一次 PLC, 失败时调 connect_check()
+//       * 直接用 get_client() 拿 modbus_t* 调 modbus_write_registers 写一次
+// =========================================================================
 
-#define IP			"172.16.178.4"
-#define IP_LOCAL	"127.0.0.1"
+#define IP			"172.16.178.4"   // 默认 PLC IP, 可被 json 覆盖
+#define IP_LOCAL	"127.0.0.1"      // 本地监听用(测试场景)
 #define PORT		502
 #define SLAVE_ID	1
-#define HEART_FREQ	25
-// 重连次数
+// 重连尝试次数上限(保留宏供工程其它地方使用)
 #define RECONNECT_TIMES 100
-// 读取发送起始地址
+// 读取 / 发送起始地址
 #define READ_ADDR 2000
 #define SEND_ADDR 2300
-// 读取发送寄存器个数
+// 读取 / 发送寄存器个数
 #define RCV_BUF_LEN 20
 #define SEND_BUF_LEN 20
 
-
 class Plc_interact {
 private:
-    modbus_t* client;
-    uint16_t connect_flag = 0;
-    std::string m_ip; // 新增：保存此实例对应的真实 IP
-    /***读取PLC数据		所有数据均为四字节
-    * 0 心跳信号		0-32768
-    * 1 大车位置	单位cm
-    * 2 小车位置	单位cm
-    * 3 起升高度	单位cm
-    * 4 开闭锁状态	0开锁，1闭锁
-    * 5 大车速度	单位mm/s
-    * 6 小车速度	单位mm/s
-    * 7 起升速度	单位mm/s
-    * 8 着箱状态	0未着箱，1着箱
-    * 9 吊具尺寸	20,40,45
-    * 10 旁路复位信号		0默认，1按下复位按钮
-    *
-    * 12 外集卡放箱位置		1前20尺，2中20尺或40尺 3后20尺
-    * 13 集卡引导启动		0不启动，1启动
-    * 14 作业类型			0默认，1收箱前20，2收箱后20，3收箱40，4发箱前20，5发箱后20，6发箱40
-    **/
+    modbus_t* client = nullptr;   // libmodbus 句柄, 失败时为 null
+    uint16_t     connect_flag = 0;         // 0=未连接/已断开, 1=已连接
+    std::string  m_ip;                     // 该实例对应的 IP
+
+    // 接收缓冲. 由 get_modbus_data() 写入; 上层 PlcIoManager 通过
+    // get_rcv_buf() 拿首地址再 SetAll 到共享 buffer.
     uint16_t rcv_buf[RCV_BUF_LEN] = { 0 };
 
-    /****
-    * 发送到PLC
-     0   心跳                         0-65535
-     1   海左相机通讯状态           0断开，1通讯正常
-     2   海右相机通讯状态           0断开，1通讯正常
-     3   陆左相机通讯状态           0断开，1通讯正常
-     4   陆右相机通讯状态           0断开，1通讯正常
-     5   左侧大车视觉防撞目标距离   单位cm
-     6   右侧大车视觉防撞目标距离   单位cm
-     7   大车防撞限速方向           0不限速，1左向限速，2右向限速，3两侧限速
-     8   大车停止信号               0无动作，1左向停止，2右向停止，3双向停止
-
-    ****/
-    uint16_t send_buf[SEND_BUF_LEN] = { 0 };
-
 public:
-    Plc_interact(std::string ip) : m_ip(ip) { // 保存传入的 IP
+    // 构造: 立即尝试连接一次. 失败时 connect_flag=0, 不抛异常.
+    // 上层 PlcIoManager 在 IO 线程里看到失败时会调 connect_check() 重试.
+    Plc_interact(std::string ip) : m_ip(ip) {
         client = connect_modbus(m_ip.c_str(), PORT, SLAVE_ID);
-        // 【关键】移除 while (!client); 允许构造函数失败并返回
-        if (client) connect_flag = 1;
-        else connect_flag = 0;
+        connect_flag = (client ? 1 : 0);
     }
-    /*** 分配线程循环检查连接标志位，断线重连，心跳发送失败三次断线重连 ***/
-    void connect_check();
+
+    ~Plc_interact() {
+        if (client) {
+            modbus_close(client);
+            modbus_free(client);
+            client = nullptr;
+        }
+    }
+
+    Plc_interact(const Plc_interact&) = delete;
+    Plc_interact& operator=(const Plc_interact&) = delete;
+
+    // ===== 连接管理 =====
+    // ---------------------------------------------------------------------
+    // connect_modbus —— 单次尝试建立连接, 不重试
+    // ---------------------------------------------------------------------
+    // 入参:
+    //     ip / port / server_id  目标 PLC 地址
+    // 返回: 成功的 modbus_t* 句柄; 失败 nullptr.
+    // 副作用: 成功时把 connect_flag 置 1.
     modbus_t* connect_modbus(const char* ip, int port, int server_id);
 
-    // ==== 相机通讯状态发送 (0断开，1通讯正常) ====
-    void send_SeaEastCamera_status(uint16_t status);
-    void send_SeaWestCamera_status(uint16_t status);
-    void send_LandEastCamera_status(uint16_t status);
-    void send_LandWestCamera_status(uint16_t status);
+    // ---------------------------------------------------------------------
+    // connect_check —— 单次连接自检 + 必要时重建
+    // ---------------------------------------------------------------------
+    // 行为:
+    //   - 若 connect_flag != 0 且 client 仍然有效: 立即返回 true
+    //   - 若 connect_flag == 0: 释放旧 client, 重新调一次 connect_modbus
+    //                           成功 → 返回 true, 失败 → 返回 false
+    // 阻塞性: 不死循环, 不内部 sleep. 仅一次系统调用的耗时.
+    // 调用方: PlcIoManager 在 RcvLoop / SendLoop 检测到失败时调.
+    bool connect_check();
 
-    // ==== 大车视觉防撞目标距离发送 (单位：cm) ====
-    void send_EastDistance(uint16_t dist_cm);
-    void send_WestDistance(uint16_t dist_cm);
+    // ===== 单次读 =====
+    // ---------------------------------------------------------------------
+    // get_modbus_data —— 整段读 RCV_BUF_LEN 个寄存器到 rcv_buf
+    // ---------------------------------------------------------------------
+    // 返回:
+    //     true   读取成功, 数据在 rcv_buf
+    //     false  client 为空 / 未连接 / modbus_read_registers 失败
+    //            (内部置 connect_flag=0, 上层下次循环会调 connect_check)
+    // 阻塞: 同步, 仅一次 modbus 请求时长(几 ms).
+    bool get_modbus_data();
 
-    // ==== 大车动作控制发送 ====
-    // 0不限速，1东向限速，2西向限速，3两侧限速
-    void send_SpeedLimit_Direction(uint16_t dir);
-    // 0无动作，1东向停止，2西向停止，3双向停止
-    void send_Stop_Direction(uint16_t dir);
-
-    // 更新并发送心跳，分配线程调用
-    void send_heart_beat();
-
-    /****** modbus读取 ******/
-    void get_modbus_data();
-    // 整串读取modbus数据，失败返回false，成功true
+    // ===== 访问器 =====
+    // 取最近一次成功 get_modbus_data 后的接收缓冲首地址(长度 RCV_BUF_LEN).
     uint16_t* get_rcv_buf();
-    /*****/
+
+    // 取底层 modbus_t*. 上层 PlcIoManager 直接 modbus_write_registers 写整段.
     modbus_t* get_client();
 
+    // 当前是否处于"已连接"状态.
+    bool is_connected() const { return connect_flag != 0; }
+
+    // 调试: 把 rcv_buf 全部打印到日志.
     void output_rcv_data();
 };
 

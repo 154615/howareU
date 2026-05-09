@@ -11,7 +11,7 @@
 #include "camera_source.h"
 #include "frame_sink.h"
 #include "i_ptz_control.h"
-#include "modbus_cfg.h"   // Plc_interact, IP
+#include "plc_io.h"          // PlcReceiveBuffer / PlcSendBuffer (代替原 modbus_cfg.h 直接持有)
 
 // =========================================================================
 // anti_collision_app.h —— 应用耦合层(第二层)
@@ -54,8 +54,8 @@
 // -------------------------------------------------------------------------
 struct CameraEntry {
     std::string ip;                 // 设备 IP, 如 "192.168.1.64"
-    int         port = 8000;     // SDK 登录端口(海康默认 8000)
-    std::string user = "admin";  // 登录账号
+    int         port    = 8000;     // SDK 登录端口(海康默认 8000)
+    std::string user    = "admin";  // 登录账号
     std::string pwd;                // 登录密码(必填)
     int         channel = 1;        // 通道号(球机一般为 1)
 };
@@ -73,9 +73,9 @@ struct AntiCollisionAppConfig {
 
     // ===== 防撞业务参数 =====
     // 区域上下切分比例, 0~1; 默认 0.5
-    float       split_ratio = 0.5f;
+    float       split_ratio       = 0.5f;
     // 截图保留天数, > 0 启动磁盘清理线程
-    int         retain_days = 0;
+    int         retain_days       = 0;
     // 是否在桌面用 cv::imshow 调试 4 路画面
     bool        enable_debug_show = false;
 
@@ -88,11 +88,11 @@ struct AntiCollisionAppConfig {
 
     // ===== 防撞细节阈值(可选, 不填走默认) =====
     // 业务侧二次过滤阈值(NMS 之后再筛一遍)
-    float conf_threshold = 0.5f;
+    float conf_threshold         = 0.5f;
     // 入侵像素数阈值(目标 mask ∩ 区域 mask 像素数)
     int   intrusion_pixel_thresh = 500;
     // 报警保持时间, 毫秒, 防 PLC 抖动
-    int   alarm_hold_ms = 2000;
+    int   alarm_hold_ms          = 2000;
     // 截图保存目录
     std::string snapshot_dir = "./save_log/save_result/";
     // 磁盘清理目标目录列表
@@ -102,14 +102,13 @@ struct AntiCollisionAppConfig {
     };
 
     // ===== 相机源参数(透传给 CameraSourceConfig) =====
-    int  poll_interval_ms = 33;     // poll 节拍, ~30Hz
+    int  poll_interval_ms      = 33;     // poll 节拍, ~30Hz
     int  reconnect_interval_ms = 3000;   // 重连最小间隔
-    bool auto_connect = true;   // Start 时自动建立连接
+    bool auto_connect          = true;   // Start 时自动建立连接
 
-    // ===== PLC 配置 =====
-    bool        enable_plc = true;  // 是否启动 PLC 通讯线程
-    std::string plc_ip = IP;    // 默认用 modbus_cfg.h 里的 IP 宏
-    int         plc_publish_interval_ms = 100;   // 防撞结果写 PLC 的周期(毫秒)
+    // ===== App 内 PLC 写入节拍 =====
+    // 防撞结果写入 PlcSendBuffer 的频率(实际 modbus 下发由 PlcIoManager 统一做)
+    int  plc_publish_interval_ms = 100;
 };
 
 
@@ -121,8 +120,8 @@ struct AntiCollisionAppConfig {
 // 线程模型:
 //   - 自身只起 1 条 plc_publish_thread_(由 Start 启动)
 //   - 间接持有: 4 × CameraSource(各 1 个 poll 线程) + ACS(4 worker + 清理)
-//   - PLC 底层 Plc_interact 内部还有几条 detach 线程(心跳/重连/收数)
-//   总计典型 ≈ 1 + 4 + 5 + 4 = 14 条线程
+//   - PLC 通讯走外部 PlcIoManager, 不在本 App 内
+//   总计典型 ≈ 1 + 4 + 5 = 10 条线程
 //
 // 线程安全:
 //   - Configure / Start / Stop 必须由同一管理线程调(通常是 main)
@@ -140,11 +139,10 @@ public:
     AntiCollisionApp();
 
     // 析构: 自动调用 Stop() 等所有线程退出, 释放所有底层对象.
-    // 注意: PLC 底层有几条 detach 线程在阻塞调用中, 析构后短时间内可能
-    // 还在跑, 这是 Plc_interact 设计局限, 不影响进程退出.
+    // 不释放共享 PLC buffer (由外部 PlcIoManager 持有).
     ~AntiCollisionApp();
 
-    AntiCollisionApp(const AntiCollisionApp&) = delete;
+    AntiCollisionApp(const AntiCollisionApp&)            = delete;
     AntiCollisionApp& operator=(const AntiCollisionApp&) = delete;
 
     // ---------------------------------------------------------------------
@@ -154,25 +152,28 @@ public:
     //     1) 校验 cfg(model_path 非空 / 区域 4 角点齐全 / 帧尺寸合理 等)
     //     2) 建 ACS(此时 ACS 仅构造, 模型未加载, 线程未起)
     //     3) 建 4 个 CameraSource, 每个挂 ACS 为 sink
-    //     4) 配置 PLC 实例(尚未启动)
+    //     4) 保存 PLC buffer 指针
     // 入参:
-    //     cfg  全部配置. 函数内部会复制保留.
+    //     cfg          全部配置. 函数内部会复制保留.
+    //     rcv_buffer   PLC 接收缓冲(由 main 通过 PlcIoManager 注入).
+    //                  寿命必须 > 本 App. 不取所有权.
+    //                  传 nullptr 表示禁用 PLC 输入, App 不读 PLC 状态.
+    //     send_buffer  PLC 发送缓冲. 同上, nullptr 时不写 PLC.
     // 返回:
     //     true  配置成功, 可以进入 Start()
     //     false 配置非法或重复调用 Configure
     // 阻塞性: 不阻塞.
-    // 副作用: 如果失败, 内部部分对象可能已建好, 但本类不会自动清理 —
-    //         按当前实现, 失败后正确做法是直接销毁本对象重来.
-    bool Configure(const AntiCollisionAppConfig& cfg);
+    bool Configure(const AntiCollisionAppConfig& cfg,
+                   PlcReceiveBuffer* rcv_buffer  = nullptr,
+                   PlcSendBuffer*    send_buffer = nullptr);
 
     // ---------------------------------------------------------------------
     // Start() —— 启动所有线程
     // ---------------------------------------------------------------------
     // 启动顺序(对应内部实现):
-    //     1) 启动 PLC 通讯线程(若 enable_plc)
-    //     2) ACS Start(&state_)        ← 加载模型 + 起 4 worker
-    //     3) 4 路 source.Start()        ← 起 poll 线程, 开始拉流
-    //     4) 启动 PLC 发布线程
+    //     1) ACS Start(&state_)         ← 加载模型 + 起 4 worker
+    //     2) 4 路 source.Start()         ← 起 poll 线程, 开始拉流
+    //     3) 启动 PLC 发布线程            ← 把 4 路报警写入 PlcSendBuffer
     // 必须在 Configure() 之后调用. 重复调用是无操作.
     // 返回:
     //     true  启动成功
@@ -187,7 +188,7 @@ public:
     //     1) running_=false → PLC 发布线程退出 + join
     //     2) 4 路 source.Stop()    ← 先停生产, 不再有新帧灌入消费端
     //     3) ACS.Stop()             ← 再停消费, 安全 join 4 worker
-    //     4) plc_send / plc_rcv reset
+    //   注: 不释放 PLC buffer, 它们由外部 PlcIoManager 管理.
     // 阻塞性: 阻塞, 直到所有线程退出.
     // 幂等: 重复调用安全.
     void Stop();
@@ -243,14 +244,6 @@ public:
     // 取消注册. 找不到匹配项是无操作.
     void DetachSink(int cam_index, FrameSink* sink);
 
-    // ---------------------------------------------------------------------
-    // PLC 句柄访问(供 main 或其它业务模块直接读写 PLC 时使用)
-    // ---------------------------------------------------------------------
-    // 返回值生命周期与本 App 绑定(对应 unique_ptr 的裸指针), 不释放.
-    // 未 enable_plc 或 Start 之前调用会返回 nullptr.
-    Plc_interact* GetPlcRcv() { return plc_rcv_.get(); }
-    Plc_interact* GetPlcSend() { return plc_send_.get(); }
-
 private:
     // PLC 发布线程主循环: 每 plc_publish_interval_ms 调一次 PublishToPlc().
     void PlcPublishLoop();
@@ -273,13 +266,15 @@ private:
     AntiCollisionState                         state_;        // 算法 → App 的共享状态
     std::array<std::unique_ptr<CameraSource>, 4> sources_;    // 第一层 × 4
 
-    // ===== PLC 通讯(应用层耦合) =====
-    std::unique_ptr<Plc_interact>              plc_rcv_;            // 收 PLC
-    std::unique_ptr<Plc_interact>              plc_send_;           // 发 PLC
-    std::thread                                plc_publish_thread_; // 100ms 发布线程
+    // ===== 共享 PLC buffer(由 main 注入, 不取所有权) =====
+    PlcReceiveBuffer*                          rcv_buffer_  = nullptr;
+    PlcSendBuffer*                             send_buffer_ = nullptr;
+
+    // ===== PLC 发布线程(把算法结果写入 send_buffer_) =====
+    std::thread                                plc_publish_thread_;
 
     // ===== PLC 跳变去重缓存 =====
     // 上一次写入 PLC 的急停码 / 限速码; 用于打日志时判跳变, 避免刷屏.
-    uint16_t                                   last_stop_code_ = 0;
+    uint16_t                                   last_stop_code_  = 0;
     uint16_t                                   last_speed_code_ = 0;
 };

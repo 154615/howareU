@@ -3,98 +3,130 @@
 #include <string>
 
 #include "anti_collision_app.h"
+#include "anti_lift_app.h"
+#include "plc_io.h"
 
 // =========================================================================
-// config_loader.h —— 配置加载器: 从 json 文件读出 AntiCollisionAppConfig
+// config_loader.h —— 配置加载器: 从 json 文件读出全部 App 配置
 // -------------------------------------------------------------------------
 // 模块定位:
 //   纯工具函数; 不持有任何状态. 把 json 字段名/解析细节从 main 里抽出来,
 //   未来切换 yaml / 命令行参数 / 远程下发只动这一处.
-//
-// 设计哲学:
-//   - main 只关心配置结构体, 不关心 json 字段名
-//   - 所有字段都有合理默认值, json 里缺失时使用默认, 不会失败
-//   - 仅几个"必填项"(如 model_path / IP / 角点) 缺失时返回 false
-// =========================================================================
+// -------------------------------------------------------------------------
 
 
 // -------------------------------------------------------------------------
-// json 字段约定(命名风格: 全大写 + 下划线)
+// AppBundleConfig —— 顶层配置容器, 同时承载防撞 / 防吊起 / PLC IO
+// -------------------------------------------------------------------------
+struct AppBundleConfig {
+    // 是否启用各 App. 测试时可以单独开/关
+    bool enable_anti_collision = true;
+    bool enable_anti_lift      = true;
+
+    // 各模块配置
+    PlcIoManager::Config       plc_io;          // PLC 接收/发送配置
+    AntiCollisionAppConfig     anti_collision;  // 防撞 App 配置
+    AntiLiftAppConfig          anti_lift;       // 防吊起 App 配置
+};
+
+
+// -------------------------------------------------------------------------
+// json 字段约定(全大写 + 下划线)
 // -------------------------------------------------------------------------
 //
-// === 检测器 ===
-//   "DETECTOR_MODEL_PATH"  string  ONNX 模型路径(必填; 兼容旧字段 "MODEL_PATH")
-//   "DETECTOR_TASK"        string  "detect" 或 "seg"(默认 "seg")
-//   "DETECTOR_IMG_W"       int     网络输入宽(默认 640)
-//   "DETECTOR_IMG_H"       int     网络输入高(默认 640)
-//   "DETECTOR_CONF"        float   类别置信度阈值, NMS 之前的(默认 0.25)
-//   "DETECTOR_NMS"         float   NMS IOU 阈值(默认 0.7)
-//   "DETECTOR_MASK"        float   分割 mask 二值化阈值, 仅 seg 用(默认 0.8)
-//   "DETECTOR_CLASSES"     string  类别名, 逗号分隔; 必填.
-//                                  形如 "driver,container20,pallet40,..."
-//   "DETECTOR_USE_CUDA"    int     0=CPU, 1=GPU, 缺省=GPU
-//   "DETECTOR_CUDA_ID"     int     CUDA 设备号(默认 0)
+// === PLC 通讯 ===
+//   "PLC_RCV_IP"           string  读取目的 IP, 缺省走 modbus_cfg.h 的 IP 宏
+//   "PLC_SEND_IP"          string  写入目的 IP, 缺省同 PLC_RCV_IP.
+//                                  测试时填 "127.0.0.1" 实现"读真PLC, 写本地观察"
+//   "PLC_RCV_INTERVAL_MS"  int     读取周期, 默认 50
+//   "PLC_SEND_INTERVAL_MS" int     写入周期, 默认 50
+//   "PLC_ENABLE"           int     0/1, 是否启用 PLC IO 线程, 默认 1
 //
-// === 业务 ===
-//   "SPLIT_RATIO"          float   减速/急停区切分比例 0~1
+// === App 总开关 ===
+//   "ENABLE_ANTI_COLLISION"   int  0/1, 默认 1
+//   "ENABLE_ANTI_LIFT"        int  0/1, 默认 1
+//
+// === 防撞 - 检测器 ===
+//   "DETECTOR_MODEL_PATH"  string  必填(兼容旧字段 "MODEL_PATH")
+//   "DETECTOR_TASK"        string  "detect" 或 "seg", 默认 "seg"
+//   "DETECTOR_IMG_W"       int     默认 640
+//   "DETECTOR_IMG_H"       int     默认 640
+//   "DETECTOR_CONF"        float   默认 0.25
+//   "DETECTOR_NMS"         float   默认 0.7
+//   "DETECTOR_MASK"        float   默认 0.8 (仅 seg)
+//   "DETECTOR_CLASSES"     string  逗号分隔, 必填
+//   "DETECTOR_USE_CUDA"    int     0/1, 默认 1
+//   "DETECTOR_CUDA_ID"     int     默认 0
+//
+// === 防撞 - 业务 ===
+//   "SPLIT_RATIO"          float   默认 0.5
 //   "MAX_RETAIN_DAYS"      int     截图保留天数
-//   "DEBUG_SHOW"           int     0/1, 是否开 cv::imshow 调试
+//   "DEBUG_SHOW"           int     0/1
+//   "INTERVAL"             int     poll 节拍 ms, 默认 33
+//   "RES_X" / "RES_Y"      float   默认 1920x1080
 //
-// === 取流 ===
-//   "INTERVAL"             int     poll 节拍, 毫秒(默认 33)
-//   "RES_X" / "RES_Y"      float   相机出图分辨率(默认 1920x1080)
+// === 防撞 - 相机连接(共享凭证) ===
+//   "DEFAULT_USER" / "DEFAULT_PWD" / "DEFAULT_PORT"
 //
-// === 相机凭证(共享默认值, 单路可覆盖) ===
-//   "DEFAULT_USER"         string  默认账号(缺省 "admin")
-//   "DEFAULT_PWD"          string  默认密码(必填, 除非每路都覆盖)
-//   "DEFAULT_PORT"         int     默认端口(缺省 8000)
+// === 防撞 - 4 路相机 ===
+//   "CAMx_IP"           string  必填,  x = 1..4
+//   "CAMx_PORT"         int     可选, 默认 DEFAULT_PORT
+//   "CAMx_USER"         string  可选, 默认 DEFAULT_USER
+//   "CAMx_PWD"          string  可选, 默认 DEFAULT_PWD
+//   "CAMx_CHANNEL"      int     默认 1
+//   "CAMx_PT1_X..PT4_Y" int     必填
 //
-// === 4 路相机连接 + 角点(x = 1..4) ===
-//   "CAMx_IP"              string  必填
-//   "CAMx_PORT"            int     可选, 默认 DEFAULT_PORT
-//   "CAMx_USER"            string  可选, 默认 DEFAULT_USER
-//   "CAMx_PWD"             string  可选, 默认 DEFAULT_PWD; 二者都空时报错
-//   "CAMx_CHANNEL"         int     通道号, 默认 1
-//   "CAMx_PT1_X" .. "PT4_Y" int    4 个角点坐标; 必填
+// === 防吊起 - 检测器(LIFT_ 前缀) ===
+//   "LIFT_DETECTOR_MODEL_PATH"   string  必填
+//   "LIFT_DETECTOR_TASK"         string  推荐 "detect"
+//   "LIFT_DETECTOR_IMG_W/H"      int
+//   "LIFT_DETECTOR_CONF/NMS"     float
+//   "LIFT_DETECTOR_CLASSES"      string  逗号分隔, 必填(类名含 hole/wheel 用作判定关键词)
+//   "LIFT_DETECTOR_USE_CUDA/CUDA_ID"
 //
-// === PLC ===
-//   "PLC_IP"               string  PLC IP, 缺省用 modbus_cfg.h 的 IP 宏
-//   "PLC_PUBLISH_INTERVAL_MS" int  写 PLC 周期, 默认 100
+// === 防吊起 - 阈值 ===
+//   "LIFT_LIMIT_HOLE_Y"            int  锁孔垂直位移阈值
+//   "LIFT_LIMIT_WHEEL_Y"           int  车轮垂直位移阈值
+//   "LIFT_LIMIT_HORIZON_LEFT"      int  水平开走阈值
+//   "LIFT_LIMIT_ROTATE_LIFT_PLT"   int  车架侧翻阈值
+//   "LIFT_LIMIT_ROTATE_LIFT_WHEEL" int  车轮侧翻阈值
+//
+// === 防吊起 - 录像 ===
+//   "LIFT_ENABLE_RECORD"   int     0/1, 默认 1
+//   "LIFT_RECORD_FPS"      int     默认 10
+//   "LIFT_RECORD_DIR"      string  默认 "./save_log/lift_record/"
+//
+// === 防吊起 - 2 路相机 ===
+//   "LIFT_CAMx_IP/_PORT/_USER/_PWD/_CHANNEL/_RTSP_URL"   (x = 1..2)
 // -------------------------------------------------------------------------
 
 
 // =========================================================================
-// LoadConfigFromJson —— 把 json 文件解析进配置结构体
+// LoadConfigFromJson —— 顶层入口, 解析整份 json 进 AppBundleConfig
 // -------------------------------------------------------------------------
 // 入参:
-//     json_path  json 配置文件路径(相对路径基于 exe 工作目录).
-//                文件不存在或格式错误时, 内部 read_*_Json 会返回空 / 0,
-//                函数据此判断必填项缺失而失败.
-//
-//     out_cfg    [输出] 解析后的配置. 函数会就地写入; 调用方传入的内容会
-//                被覆盖. 调用方负责对象寿命.
-//
+//     json_path  json 配置文件路径
+//     out        [输出] 解析结果
 // 返回:
-//     true   解析成功. out_cfg 已可用作 AntiCollisionApp::Configure 的入参.
-//     false  必填项缺失或非法; stderr 有具体原因. out_cfg 处于部分填充
-//            状态, 不应使用.
+//     true   解析成功
+//     false  必填项缺失或文件无法打开; stderr 输出失败原因
+// 阻塞: 同步, 仅 IO 时间
 //
 // 必填项校验:
-//     - DETECTOR_MODEL_PATH (或旧名 MODEL_PATH) 非空
-//     - DETECTOR_CLASSES 非空
-//     - 4 路相机各自 CAMx_IP 非空、CAMx_PWD 非空(可由 DEFAULT_PWD 提供)
-//     - 4 路相机各自 4 个角点齐全
-//
-// 阻塞性: 同步阻塞, 仅 IO 时间(几毫秒).
-// 线程安全: 只读 json 文件 + 写出参, 多线程加载不同文件互不干扰.
-// 异常: 不抛. 任何错误以返回 false 体现.
+//     - 防撞 (若启用): DETECTOR_MODEL_PATH, DETECTOR_CLASSES, 4 路 CAM
+//     - 防吊起 (若启用): LIFT_DETECTOR_MODEL_PATH, LIFT_DETECTOR_CLASSES, 2 路 LIFT_CAM
 //
 // 用法:
-//     AntiCollisionAppConfig cfg;
-//     if (!LoadConfigFromJson("./anti_collision.json", cfg)) {
-//         return 1;
-//     }
-//     // 此时 cfg 已可用
+//     AppBundleConfig cfg;
+//     if (!LoadConfigFromJson("./config.json", cfg)) return 1;
+// =========================================================================
+bool LoadConfigFromJson(const std::string& json_path, AppBundleConfig& out);
+
+
+// =========================================================================
+// (兼容旧 main 接口) 单独加载防撞 App 配置
+// 内部调用顶层 LoadConfigFromJson 后取出 anti_collision 部分.
+// 旧的 main / 单元测试代码不用改.
 // =========================================================================
 bool LoadConfigFromJson(const std::string& json_path,
-    AntiCollisionAppConfig& out_cfg);
+                        AntiCollisionAppConfig& out_cfg);
