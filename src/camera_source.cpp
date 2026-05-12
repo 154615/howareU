@@ -2,27 +2,49 @@
 
 #include <algorithm>
 #include <chrono>
-#include <iostream>
 #include <mutex>
 #include <sstream>
 
 #include "HikvisionCamera.h"
 #include "rtsp_gpu_stream.h"
+#include "utils.h"   // LOG_COMMON: 带时间戳 + 落盘 + 多线程安全
 
 namespace {
 
-    template <typename... Args>
-    void Log(Args&&... args) {
+    // RFC 3986 userinfo 中的保留字符必须做 percent-encoding,
+    // 否则 FFmpeg 解析 rtsp://user:pwd@host 时, 密码里的 @ : / # ? 会被切错.
+    // 例如 pwd="Hc@RTG210" 直接拼出 rtsp://admin:Hc@RTG210@host..., FFmpeg
+    // 会把第一个 @ 当 userinfo 分隔符, 主机变成 "RTG210@host", 必然连不上.
+    // 这里对所有非 unreserved 字符全部编码, 比白名单更稳.
+    std::string UrlEncodeUserInfo(const std::string& s) {
         std::ostringstream oss;
-        (oss << ... << args);
-        std::cout << oss.str() << std::endl;
+        oss << std::uppercase << std::hex;
+        for (unsigned char c : s) {
+            // unreserved: A-Z a-z 0-9 - _ . ~
+            bool unreserved = (c >= 'A' && c <= 'Z')
+                || (c >= 'a' && c <= 'z')
+                || (c >= '0' && c <= '9')
+                || c == '-' || c == '_' || c == '.' || c == '~';
+            if (unreserved) {
+                oss << static_cast<char>(c);
+            }
+            else {
+                oss << '%';
+                if (c < 0x10) oss << '0';
+                oss << static_cast<int>(c);
+            }
+        }
+        return oss.str();
     }
 
     // 海康主码流 RTSP URL: rtsp://user:pwd@ip:554/Streaming/Channels/{channel}01
+    // 注意: user / pwd 里可能含 @ : / # ? 等保留字符, 必须 percent-encode.
     std::string BuildHikRtspUrl(const std::string& user, const std::string& pwd,
         const std::string& ip, int channel) {
         std::ostringstream oss;
-        oss << "rtsp://" << user << ":" << pwd << "@" << ip
+        oss << "rtsp://" << UrlEncodeUserInfo(user)
+            << ":" << UrlEncodeUserInfo(pwd)
+            << "@" << ip
             << ":554/Streaming/Channels/" << channel << "01";
         return oss.str();
     }
@@ -70,9 +92,14 @@ struct CameraSource::Impl {
     std::unique_ptr<HikvisionCamera>     camera;
     std::unique_ptr<HikvisionPtzAdapter> ptz;
 
-    Clock::time_point last_connect_attempt = (Clock::time_point::min)();
-    Clock::time_point gpu_open_time = (Clock::time_point::min)();
-    Clock::time_point last_recover_attempt = (Clock::time_point::min)();
+    // 三个 time_point 用 epoch (= time_point{}) 而不是 time_point::min().
+    // 理由: 后续要做 (now - last_*) 然后 cast 成 int64 毫秒, time_point::min()
+    //       本质是 -INT64_MAX 量级, 减法结果不在 int64 范围内 → UB.
+    //       实测 elapsed 会变成接近 INT64_MIN 的巨大负数, 导致
+    //       elapsed < reconnect_interval_ms 永远成立, 首连分支死循环 sleep.
+    Clock::time_point last_connect_attempt{};   // = epoch
+    Clock::time_point gpu_open_time{};
+    Clock::time_point last_recover_attempt{};
     bool              sdk_fallback = false;
 
     Impl() {
@@ -144,7 +171,7 @@ namespace {
 // =========================================================================
 void CameraSource::Start() {
     if (is_running_.exchange(true)) {
-        Log("[CameraSource cam", cfg_.cam_index, "] 已经在运行");
+        LOG_COMMON("[CameraSource cam" << cfg_.cam_index << "] 已经在运行");
         return;
     }
     if (cfg_.auto_connect) want_connected_.store(true);
@@ -160,7 +187,7 @@ void CameraSource::Start() {
 
             // ====== 1) 主动断开 ======
             if (!want && (gpu_alive || sdk_logged_in)) {
-                Log("[CameraSource cam", cfg_.cam_index, "] 主动断开");
+                LOG_COMMON("[CameraSource cam" << cfg_.cam_index << "] 主动断开");
                 impl_->gpu_stream->Close();
                 impl_->camera->disconnect();
                 impl_->sdk_fallback = false;
@@ -185,9 +212,10 @@ void CameraSource::Start() {
                 }
                 impl_->last_connect_attempt = now;
 
-                Log("[CameraSource cam", cfg_.cam_index,
-                    "] 尝试连接 GPU=", cfg_.rtsp_url,
-                    " | SDK=", cfg_.ip, ":", cfg_.port, " ch=", cfg_.channel);
+                LOG_COMMON("[CameraSource cam" << cfg_.cam_index
+                    << "] 尝试连接 GPU=" << cfg_.rtsp_url
+                    << " | SDK=" << cfg_.ip << ":" << cfg_.port
+                    << " ch=" << cfg_.channel);
 
                 // a) 海康 SDK 仅登录 (PTZ 通道 + 兜底备用), 不开 RealPlay
                 bool sdk_ok = impl_->camera->connect(
@@ -199,9 +227,9 @@ void CameraSource::Start() {
                 impl_->gpu_open_time = Clock::now();
                 impl_->sdk_fallback = false;
 
-                Log("[CameraSource cam", cfg_.cam_index,
-                    "] SDK login=", sdk_ok ? "OK" : "FAIL",
-                    " | GPU stream=", gpu_ok ? "OK" : "FAIL");
+                LOG_COMMON("[CameraSource cam" << cfg_.cam_index
+                    << "] SDK login=" << (sdk_ok ? "OK" : "FAIL")
+                    << " | GPU stream=" << (gpu_ok ? "OK" : "FAIL"));
 
                 std::this_thread::sleep_for(
                     std::chrono::milliseconds(cfg_.poll_interval_ms));
@@ -218,12 +246,12 @@ void CameraSource::Start() {
                 if (IsGpuStale(*impl_->gpu_stream, impl_->gpu_open_time,
                     cfg_.gpu_cold_start_grace_ms,
                     cfg_.gpu_stale_threshold_ms)) {
-                    Log("[CameraSource cam", cfg_.cam_index,
-                        "] GPU 流不健康 (",
-                        impl_->gpu_stream->HasEverProduced()
-                        ? std::to_string(impl_->gpu_stream->MillisSinceLastFrame()) + "ms 无新帧"
-                        : std::to_string(cfg_.gpu_cold_start_grace_ms) + "ms 内无首帧",
-                        "), 切换到 SDK 软解兜底");
+                    LOG_COMMON("[CameraSource cam" << cfg_.cam_index
+                        << "] GPU 流不健康 ("
+                        << (impl_->gpu_stream->HasEverProduced()
+                            ? std::to_string(impl_->gpu_stream->MillisSinceLastFrame()) + "ms 无新帧"
+                            : std::to_string(cfg_.gpu_cold_start_grace_ms) + "ms 内无首帧")
+                        << "), 切换到 SDK 软解兜底");
 
                     impl_->gpu_stream->Close();
                     if (impl_->camera->startRealPlay()) {
@@ -231,8 +259,8 @@ void CameraSource::Start() {
                         impl_->last_recover_attempt = Clock::now();
                     }
                     else {
-                        Log("[CameraSource cam", cfg_.cam_index,
-                            "] SDK 软解启动失败, 下轮再试");
+                        LOG_COMMON("[CameraSource cam" << cfg_.cam_index
+                            << "] SDK 软解启动失败, 下轮再试");
                     }
                 }
             }
@@ -246,7 +274,7 @@ void CameraSource::Start() {
                     now - impl_->last_recover_attempt).count();
                 if (since_last_probe >= cfg_.gpu_recover_probe_ms) {
                     impl_->last_recover_attempt = now;
-                    Log("[CameraSource cam", cfg_.cam_index, "] 探测 GPU 解码恢复...");
+                    LOG_COMMON("[CameraSource cam" << cfg_.cam_index << "] 探测 GPU 解码恢复...");
 
                     impl_->gpu_stream->Open(cfg_.rtsp_url, cfg_.gpu_device);
                     impl_->gpu_open_time = Clock::now();
@@ -261,14 +289,14 @@ void CameraSource::Start() {
                     }
 
                     if (impl_->gpu_stream->HasEverProduced()) {
-                        Log("[CameraSource cam", cfg_.cam_index,
-                            "] GPU 已恢复, 关闭 SDK 软解");
+                        LOG_COMMON("[CameraSource cam" << cfg_.cam_index
+                            << "] GPU 已恢复, 关闭 SDK 软解");
                         impl_->camera->stopRealPlay();
                         impl_->sdk_fallback = false;
                     }
                     else {
-                        Log("[CameraSource cam", cfg_.cam_index,
-                            "] GPU 恢复失败, 继续 SDK 软解");
+                        LOG_COMMON("[CameraSource cam" << cfg_.cam_index
+                            << "] GPU 恢复失败, 继续 SDK 软解");
                         impl_->gpu_stream->Close();
                     }
                 }
@@ -287,7 +315,7 @@ void CameraSource::Start() {
         }
         });
 
-    Log("[CameraSource cam", cfg_.cam_index, "] 已启动");
+    LOG_COMMON("[CameraSource cam" << cfg_.cam_index << "] 已启动");
 }
 
 void CameraSource::Stop() {
@@ -298,7 +326,7 @@ void CameraSource::Stop() {
 
     impl_->gpu_stream->Close();
     impl_->camera->disconnect();
-    Log("[CameraSource cam", cfg_.cam_index, "] 已停止");
+    LOG_COMMON("[CameraSource cam" << cfg_.cam_index << "] 已停止");
 }
 
 void CameraSource::RequestConnect() { want_connected_.store(true); }

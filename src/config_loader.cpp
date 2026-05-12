@@ -41,10 +41,10 @@ namespace {
     // 通用: 读单路相机连接信息(适用于 CAMx_ 与 LIFT_CAMx_ 两种前缀)
     template <typename Entry>
     Entry ReadCameraGeneric(const std::string& json_path,
-                            const std::string& prefix,
-                            const std::string& default_user,
-                            const std::string& default_pwd,
-                            int default_port) {
+        const std::string& prefix,
+        const std::string& default_user,
+        const std::string& default_pwd,
+        int default_port) {
         Entry e;
         e.ip = read_String_Json(json_path, prefix + "IP");
 
@@ -65,25 +65,25 @@ namespace {
 
     // 通用: 读检测器配置(适用于防撞 / 防吊起两种前缀)
     void ReadDetectorConfig(const std::string& json_path,
-                            const std::string& prefix,
-                            Yolov8DetectorConfig& d) {
+        const std::string& prefix,
+        Yolov8DetectorConfig& d) {
         d.model_path = read_String_Json(json_path, prefix + "MODEL_PATH");
 
         std::string task = read_String_Json(json_path, prefix + "TASK");
         d.task = (task == "detect" || task == "Detect")
-                 ? TaskType::Detect : TaskType::Seg;
+            ? TaskType::Detect : TaskType::Seg;
 
         int w = read_Int_Json(json_path, prefix + "IMG_W");
         int h = read_Int_Json(json_path, prefix + "IMG_H");
-        if (w > 0) d.img_width  = w;
+        if (w > 0) d.img_width = w;
         if (h > 0) d.img_height = h;
 
         float conf = read_Float_Json(json_path, prefix + "CONF");
-        float nms  = read_Float_Json(json_path, prefix + "NMS");
-        float msk  = read_Float_Json(json_path, prefix + "MASK");
+        float nms = read_Float_Json(json_path, prefix + "NMS");
+        float msk = read_Float_Json(json_path, prefix + "MASK");
         if (conf > 0.0f) d.conf_threshold = conf;
-        if (nms  > 0.0f) d.nms_threshold  = nms;
-        if (msk  > 0.0f) d.mask_threshold = msk;
+        if (nms > 0.0f) d.nms_threshold = nms;
+        if (msk > 0.0f) d.mask_threshold = msk;
 
         std::string classes = read_String_Json(json_path, prefix + "CLASSES");
         if (!classes.empty()) d.class_names = SplitCsv(classes);
@@ -102,10 +102,10 @@ namespace {
     void LoadPlcIo(const std::string& json_path, PlcIoManager::Config& out) {
         std::string default_ip = IP;   // modbus_cfg.h 宏
 
-        std::string rcv  = read_String_Json(json_path, "PLC_RCV_IP");
+        std::string rcv = read_String_Json(json_path, "PLC_RCV_IP");
         std::string send = read_String_Json(json_path, "PLC_SEND_IP");
 
-        out.rcv_ip  = rcv.empty()  ? default_ip : rcv;
+        out.rcv_ip = rcv.empty() ? default_ip : rcv;
         out.send_ip = send.empty() ? out.rcv_ip : send;
 
         int rcv_iv = read_Int_Json(json_path, "PLC_RCV_INTERVAL_MS");
@@ -125,7 +125,7 @@ namespace {
     //   返回 false 表示必填项缺失
     // -------------------------------------------------------------------------
     bool LoadAntiCollision(const std::string& json_path,
-                           AntiCollisionAppConfig& out) {
+        AntiCollisionAppConfig& out) {
         // ---- 检测器 ----
         ReadDetectorConfig(json_path, "DETECTOR_", out.detector);
         // 兼容旧字段 MODEL_PATH
@@ -140,7 +140,7 @@ namespace {
 
         // ---- 共享凭证 ----
         std::string default_user = read_String_Json(json_path, "DEFAULT_USER");
-        std::string default_pwd  = read_String_Json(json_path, "DEFAULT_PWD");
+        std::string default_pwd = read_String_Json(json_path, "DEFAULT_PWD");
         int         default_port = read_Int_Json(json_path, "DEFAULT_PORT");
         if (default_user.empty()) default_user = "admin";
         if (default_port <= 0)    default_port = 8000;
@@ -160,7 +160,7 @@ namespace {
 
         for (int i = 0; i < 4; ++i) {
             out.regions[i].quad = ReadQuad(json_path, i + 1);
-            out.regions[i].frame_width  = W;
+            out.regions[i].frame_width = W;
             out.regions[i].frame_height = H;
         }
 
@@ -174,24 +174,24 @@ namespace {
 
         // ---- 校验 ----
         if (out.detector.model_path.empty()) {
-            std::cerr << "[ConfigLoader] DETECTOR_MODEL_PATH 为空" << std::endl;
+            LOG_COMMON("[ConfigLoader] DETECTOR_MODEL_PATH 为空");
             return false;
         }
         if (out.detector.class_names.empty()) {
-            std::cerr << "[ConfigLoader] DETECTOR_CLASSES 为空" << std::endl;
+            LOG_COMMON("[ConfigLoader] DETECTOR_CLASSES 为空");
             return false;
         }
         for (int i = 0; i < 4; ++i) {
             if (out.cameras[i].ip.empty()) {
-                std::cerr << "[ConfigLoader] CAM" << (i + 1) << "_IP 为空" << std::endl;
+                LOG_COMMON("[ConfigLoader] CAM" << (i + 1) << "_IP 为空");
                 return false;
             }
             if (out.cameras[i].pwd.empty()) {
-                std::cerr << "[ConfigLoader] CAM" << (i + 1) << "_PWD 为空" << std::endl;
+                LOG_COMMON("[ConfigLoader] CAM" << (i + 1) << "_PWD 为空");
                 return false;
             }
             if (out.regions[i].quad.size() != 4) {
-                std::cerr << "[ConfigLoader] cam" << (i + 1) << " 角点缺失" << std::endl;
+                LOG_COMMON("[ConfigLoader] cam" << (i + 1) << " 角点缺失");
                 return false;
             }
         }
@@ -223,6 +223,11 @@ namespace {
         v = read_Int_Json(json_path, "LIFT_LIMIT_ROTATE_LIFT_WHEEL");
         if (v > 0) out.algo.limit_rotate_lift_wheel = v;
 
+        v = read_Int_Json(json_path, "LIFT_LIMIT_HOIST_POSITION");
+        out.limit_hoist_pos = v;
+        v = read_Int_Json(json_path, "LIFT_LIMIT_TROLLEY_POSITION");
+        out.limit_trolley_pos = v;
+
         // ---- 录像 ----
         int en_rec = read_Int_Json(json_path, "LIFT_ENABLE_RECORD");
         if (en_rec == 0)      out.algo.enable_record = false;
@@ -240,7 +245,7 @@ namespace {
 
         // ---- 共享凭证(复用防撞那一组) ----
         std::string default_user = read_String_Json(json_path, "DEFAULT_USER");
-        std::string default_pwd  = read_String_Json(json_path, "DEFAULT_PWD");
+        std::string default_pwd = read_String_Json(json_path, "DEFAULT_PWD");
         int         default_port = read_Int_Json(json_path, "DEFAULT_PORT");
         if (default_user.empty()) default_user = "admin";
         if (default_port <= 0)    default_port = 8000;
@@ -261,22 +266,22 @@ namespace {
 
         // ---- 校验 ----
         if (out.algo.detector.model_path.empty()) {
-            std::cerr << "[ConfigLoader] LIFT_DETECTOR_MODEL_PATH 为空" << std::endl;
+            LOG_COMMON("[ConfigLoader] LIFT_DETECTOR_MODEL_PATH 为空");
             return false;
         }
         if (out.algo.detector.class_names.empty()) {
-            std::cerr << "[ConfigLoader] LIFT_DETECTOR_CLASSES 为空" << std::endl;
+            LOG_COMMON("[ConfigLoader] LIFT_DETECTOR_CLASSES 为空");
             return false;
         }
         for (int i = 0; i < 2; ++i) {
             if (out.cameras[i].ip.empty()) {
-                std::cerr << "[ConfigLoader] LIFT_CAM" << (i + 1) << "_IP 为空" << std::endl;
+                LOG_COMMON("[ConfigLoader] LIFT_CAM" << (i + 1) << "_IP 为空");
                 return false;
             }
             // 允许只填 rtsp_url 不填 pwd 的情况(通用 RTSP 源)
             if (out.cameras[i].pwd.empty() && out.cameras[i].rtsp_url.empty()) {
-                std::cerr << "[ConfigLoader] LIFT_CAM" << (i + 1)
-                          << " pwd 和 rtsp_url 都为空" << std::endl;
+                LOG_COMMON("[ConfigLoader] LIFT_CAM" << (i + 1)
+                    << " pwd 和 rtsp_url 都为空");
                 return false;
             }
         }
@@ -291,10 +296,10 @@ namespace {
 // =========================================================================
 bool LoadConfigFromJson(const std::string& json_path, AppBundleConfig& out) {
     // ---- App 总开关 ----
-    int en_ac   = read_Int_Json(json_path, "ENABLE_ANTI_COLLISION");
+    int en_ac = read_Int_Json(json_path, "ENABLE_ANTI_COLLISION");
     int en_lift = read_Int_Json(json_path, "ENABLE_ANTI_LIFT");
     if (en_ac == 0)   out.enable_anti_collision = false;
-    if (en_lift == 0) out.enable_anti_lift      = false;
+    if (en_lift == 0) out.enable_anti_lift = false;
 
     // ---- PLC IO(无论哪个 App 启用都需要) ----
     LoadPlcIo(json_path, out.plc_io);
@@ -302,41 +307,39 @@ bool LoadConfigFromJson(const std::string& json_path, AppBundleConfig& out) {
     // ---- 各 App 单独加载 ----
     if (out.enable_anti_collision) {
         if (!LoadAntiCollision(json_path, out.anti_collision)) {
-            std::cerr << "[ConfigLoader] 防撞 App 配置失败" << std::endl;
+            LOG_COMMON("[ConfigLoader] 防撞 App 配置失败");
             return false;
         }
     }
     if (out.enable_anti_lift) {
         if (!LoadAntiLift(json_path, out.anti_lift)) {
-            std::cerr << "[ConfigLoader] 防吊起 App 配置失败" << std::endl;
+            LOG_COMMON("[ConfigLoader] 防吊起 App 配置失败");
             return false;
         }
     }
 
     // ---- 概要日志 ----
-    std::cout << "[ConfigLoader] 配置加载成功: " << json_path << std::endl
-              << "  PLC: rcv=" << out.plc_io.rcv_ip
-              << " send="     << out.plc_io.send_ip
-              << " enable="   << (out.plc_io.enable ? 1 : 0) << std::endl
-              << "  AntiCollision: " << (out.enable_anti_collision ? "ON" : "OFF") << std::endl
-              << "  AntiLift:      " << (out.enable_anti_lift      ? "ON" : "OFF") << std::endl;
+    LOG_COMMON("[ConfigLoader] 配置加载成功: " << json_path);
+    LOG_COMMON("  PLC: rcv=" << out.plc_io.rcv_ip
+        << " send=" << out.plc_io.send_ip
+        << " enable=" << (out.plc_io.enable ? 1 : 0));
+    LOG_COMMON("  AntiCollision: " << (out.enable_anti_collision ? "ON" : "OFF"));
+    LOG_COMMON("  AntiLift:      " << (out.enable_anti_lift ? "ON" : "OFF"));
 
     if (out.enable_anti_collision) {
         for (int i = 0; i < 4; ++i) {
-            std::cout << "    AC cam" << (i + 1)
-                      << " IP=" << out.anti_collision.cameras[i].ip
-                      << ":"    << out.anti_collision.cameras[i].port
-                      << " ch=" << out.anti_collision.cameras[i].channel
-                      << std::endl;
+            LOG_COMMON("    AC cam" << (i + 1)
+                << " IP=" << out.anti_collision.cameras[i].ip
+                << ":" << out.anti_collision.cameras[i].port
+                << " ch=" << out.anti_collision.cameras[i].channel);
         }
     }
     if (out.enable_anti_lift) {
         for (int i = 0; i < 2; ++i) {
-            std::cout << "    LIFT cam" << (i + 1)
-                      << " IP=" << out.anti_lift.cameras[i].ip
-                      << ":"    << out.anti_lift.cameras[i].port
-                      << " ch=" << out.anti_lift.cameras[i].channel
-                      << std::endl;
+            LOG_COMMON("    LIFT cam" << (i + 1)
+                << " IP=" << out.anti_lift.cameras[i].ip
+                << ":" << out.anti_lift.cameras[i].port
+                << " ch=" << out.anti_lift.cameras[i].channel);
         }
     }
     return true;
@@ -347,7 +350,7 @@ bool LoadConfigFromJson(const std::string& json_path, AppBundleConfig& out) {
 // 兼容旧 main 接口: 单独加载防撞 App 配置
 // =========================================================================
 bool LoadConfigFromJson(const std::string& json_path,
-                        AntiCollisionAppConfig& out_cfg) {
+    AntiCollisionAppConfig& out_cfg) {
     AppBundleConfig bundle;
     bundle.enable_anti_lift = false;   // 不要求防吊起字段存在
     if (!LoadConfigFromJson(json_path, bundle)) return false;

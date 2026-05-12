@@ -20,23 +20,16 @@ uint16_t float2uint16_t(float v) {
     return data;
 }
 
+// 兼容旧 API: 转发到统一通道日志(Common).
+// 老路径 LOG/log2.txt 不再使用, 新落盘到 ./save_log/common/Log_YYYY-MM-DD.txt.
 void Log(std::string s) {
-    std::ofstream LogFile;
-    time_t timep = time(0);
-    char buf[66];
-    ctime_s(buf, sizeof buf, &timep);
-    LogFile.open("LOG/log2.txt", std::ofstream::app);
-    LogFile << "Datetime：" << buf;
-    LogFile << "Log Data： " << s << "\n";
-    std::cout << buf << ": " << s << std::endl;
-    LogFile.close();
+    WriteLogChannel(LogChannel::Common, s);
 }
 
 void Log_no_date(std::string s) {
-    std::ofstream LogFile;
-    LogFile.open("LOG/log2.txt", std::ofstream::app);
-    LogFile << "Log Data： " << s << "\n";
-    LogFile.close();
+    // 旧函数本意是"无时间戳", 但新通道全部带时间戳;
+    // 保留接口避免编译错误, 行为与 Log() 一致.
+    WriteLogChannel(LogChannel::Common, s);
 }
 
 std::string read_String_Json(std::string json_file, std::string root_name)
@@ -50,14 +43,14 @@ std::string read_String_Json(std::string json_file, std::string root_name)
 
     if (!in.is_open())
     {
-        std::cout << "Error opening file\n";
+        LOG_COMMON("[utils] Error opening file");
         return "0";
     }
     //读取根节点信息
     if (reader.parse(in, root))
         name = root[root_name].asString();
     else
-        std::cout << "parse error\n" << std::endl;
+        LOG_COMMON("[utils] parse error");
     in.close();
     return name;
 }
@@ -73,14 +66,14 @@ int read_Int_Json(std::string json_file, std::string root_name)
 
     if (!in.is_open())
     {
-        std::cout << "Error opening file\n";
+        LOG_COMMON("[utils] Error opening file");
         return 0;
     }
     //读取根节点信息
     if (reader.parse(in, root))
         data = root[root_name].asInt();
     else
-        std::cout << "parse error\n" << std::endl;
+        LOG_COMMON("[utils] parse error");
 
     in.close();
     return data;
@@ -97,14 +90,14 @@ float read_Float_Json(std::string json_file, std::string root_name)
 
     if (!in.is_open())
     {
-        std::cout << "Error opening file\n";
+        LOG_COMMON("[utils] Error opening file");
         return 0;
     }
     //读取根节点信息
     if (reader.parse(in, root))
         data = root[root_name].asFloat();
     else
-        std::cout << "parse error\n" << std::endl;
+        LOG_COMMON("[utils] parse error");
 
     in.close();
     return data;
@@ -117,7 +110,7 @@ void write_Float_Json(std::string jsonFileName, std::string root_name, std::stri
     Json::Value jsonInfo;
     if (!jsonFile.is_open())
     {
-        std::cout << "File open error." << std::endl;
+        LOG_COMMON("[utils] File open error.");
         return;
     }
     else
@@ -171,7 +164,3 @@ std::string num2str(double num) {
     std::string result = ss.str();
     return result;
 }
-
-
-
-

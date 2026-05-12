@@ -7,7 +7,7 @@
 #include <iostream>
 #include <sstream>
 
-#include "utils.h"   // SAFE_LOG: 带时间戳 + 落盘 + 多线程安全
+#include "utils.h"   // LOG_AC / LOG_COMMON / SAFE_LOG: 带时间戳 + 落盘 + 多线程安全
 
 namespace {
 
@@ -36,14 +36,6 @@ namespace {
         return box & cv::Rect(0, 0, cols, rows);
     }
 
-    // 内部诊断/启动用的简易输出 (无时间戳/不落盘) —— 启动期一次性消息用
-    template <typename... Args>
-    void Log(Args&&... args) {
-        std::ostringstream oss;
-        (oss << ... << args);
-        std::cout << oss.str() << std::endl;
-    }
-
 }  // namespace
 
 // =========================================================================
@@ -66,8 +58,8 @@ AntiCollisionSystem::AntiCollisionSystem(const AntiCollisionConfig& cfg)
     }
 
     if (cfg_.split_ratio <= 0.0f || cfg_.split_ratio >= 1.0f) {
-        Log("[AntiCollision] split_ratio 配置异常 (", cfg_.split_ratio,
-            ") 已强制设为 0.5");
+        LOG_AC("[AntiCollision] split_ratio 配置异常 (" << cfg_.split_ratio
+            << ") 已强制设为 0.5");
         cfg_.split_ratio = 0.5f;
     }
 
@@ -88,11 +80,11 @@ AntiCollisionSystem::~AntiCollisionSystem() {
 // =========================================================================
 void AntiCollisionSystem::Start(AntiCollisionState* out_state) {
     if (is_running_.load()) {
-        Log("[AntiCollision] Start() 已经在运行");
+        LOG_AC("[AntiCollision] Start() 已经在运行");
         return;
     }
     if (out_state == nullptr) {
-        Log("[AntiCollision] Start() out_state 为空，启动失败");
+        LOG_AC("[AntiCollision] Start() out_state 为空，启动失败");
         return;
     }
 
@@ -100,7 +92,7 @@ void AntiCollisionSystem::Start(AntiCollisionState* out_state) {
     bool ok = true;
     for (int i = 0; i < 4; ++i) {
         if (!regions_[i].valid) {
-            Log("[AntiCollision] 启动失败：cam", i + 1, " 区域配置无效");
+            LOG_AC("[AntiCollision] 启动失败：cam" << (i + 1) << " 区域配置无效");
             ok = false;
         }
     }
@@ -109,11 +101,11 @@ void AntiCollisionSystem::Start(AntiCollisionState* out_state) {
     if (!detector_loaded_) {
         std::string err;
         if (!detector_ || !detector_->Load(&err)) {
-            Log("[AntiCollision] 模型加载失败: ", err);
+            LOG_AC("[AntiCollision] 模型加载失败: " << err);
             return;
         }
         detector_loaded_ = true;
-        Log("[AntiCollision] 模型加载成功");
+        LOG_AC("[AntiCollision] 模型加载成功");
     }
 
     state_ = out_state;
@@ -126,8 +118,7 @@ void AntiCollisionSystem::Start(AntiCollisionState* out_state) {
 
     if (cfg_.retain_days > 0) {
         cleanup_thread_ = std::thread(&AntiCollisionSystem::DiskCleanupLoop, this);
-        Log("[AntiCollision] 磁盘清理线程已启动，保留天数: ",
-            cfg_.retain_days);
+        LOG_AC("[AntiCollision] 磁盘清理线程已启动，保留天数: " << cfg_.retain_days);
     }
 }
 
@@ -366,7 +357,7 @@ void AntiCollisionSystem::ProcessOneFrame(
             std::to_string(cam_index + 1) + "_";
         cv::imwrite(base + "draw_" + ts + ".jpg", frame);
         cv::imwrite(base + "raw_" + ts + ".jpg", clean_frame);
-        SAFE_LOG("[报警] 相机 " << (cam_index + 1)
+        LOG_AC("[报警] 相机 " << (cam_index + 1)
             << " 区域被入侵, 触发"
             << (final_stop ? "急停" : "减速")
             << ", 已截图");
@@ -378,7 +369,7 @@ void AntiCollisionSystem::ProcessOneFrame(
         else if (new_level == AlarmLevel::Decel) trans = "触发减速";
         else                                     trans = "恢复安全 (解除报警)";
 
-        SAFE_LOG("[状态跃迁] 相机 " << (cam_index + 1)
+        LOG_AC("[状态跃迁] 相机 " << (cam_index + 1)
             << " (" << dir_tag << ") 状态变化 -> " << trans);
         prev_level_[cam_index] = new_level;
     }
@@ -456,7 +447,7 @@ void AntiCollisionSystem::DiskCleanupLoop() {
             }
         }
         catch (const std::filesystem::filesystem_error& e) {
-            Log("[AntiCollision] 清理线程异常: ", e.what());
+            LOG_AC("[AntiCollision] 清理线程异常: " << e.what());
         }
         for (int i = 0; i < 360 && is_running_.load(); ++i) {
             std::this_thread::sleep_for(std::chrono::seconds(10));

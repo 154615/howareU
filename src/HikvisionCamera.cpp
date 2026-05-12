@@ -13,6 +13,8 @@
 #include <thread>
 #include <chrono>
 
+#include "utils.h"   // LOG_COMMON
+
 static std::unordered_map<long, HikvisionCamera*> g_portToInstanceMap;
 static std::unordered_map<long, HikvisionCamera*> g_userToInstanceMap;
 static std::mutex g_mapMutex;
@@ -73,12 +75,12 @@ bool HikvisionCamera::connect(const std::string& ip, int port,
 
     m_userID = NET_DVR_Login_V40(&loginInfo, &deviceInfo);
     if (m_userID < 0) {
-        std::cerr << "[ERROR] SDK Login failed! Code: " << NET_DVR_GetLastError() << std::endl;
+        LOG_COMMON("[Hikvision] SDK Login failed! Code: " << NET_DVR_GetLastError());
         return false;
     }
-    std::cout << "[INFO] Device SDK Connected. UserID: " << m_userID
+    LOG_COMMON("[Hikvision] Device SDK Connected. UserID: " << m_userID
         << " | Channel: " << m_channel
-        << (only_login ? " | Mode: PTZ-only" : " | Mode: SDK-stream") << std::endl;
+        << (only_login ? " | Mode: PTZ-only" : " | Mode: SDK-stream"));
 
     {
         std::lock_guard<std::mutex> mapLock(g_mapMutex);
@@ -98,7 +100,7 @@ bool HikvisionCamera::connect(const std::string& ip, int port,
 
     m_realPlayHandle = NET_DVR_RealPlay_V40(m_userID, &previewInfo, g_RealDataCallBack, this);
     if (m_realPlayHandle < 0) {
-        std::cerr << "[ERROR] RealPlay failed! Code: " << NET_DVR_GetLastError() << std::endl;
+        LOG_COMMON("[Hikvision] RealPlay failed! Code: " << NET_DVR_GetLastError());
         NET_DVR_Logout(m_userID);
         m_userID = -1;
         return false;
@@ -120,10 +122,10 @@ bool HikvisionCamera::startRealPlay() {
 
     m_realPlayHandle = NET_DVR_RealPlay_V40(m_userID, &previewInfo, g_RealDataCallBack, this);
     if (m_realPlayHandle < 0) {
-        std::cerr << "[ERROR] startRealPlay failed! Code: " << NET_DVR_GetLastError() << std::endl;
+        LOG_COMMON("[Hikvision] startRealPlay failed! Code: " << NET_DVR_GetLastError());
         return false;
     }
-    std::cout << "[INFO] SDK soft-decode RealPlay started (fallback)" << std::endl;
+    LOG_COMMON("[Hikvision] SDK soft-decode RealPlay started (fallback)");
     return true;
 }
 
@@ -174,7 +176,7 @@ void HikvisionCamera::disconnect() {
             std::lock_guard<std::mutex> mapLock(g_mapMutex);
             g_userToInstanceMap.erase(m_userID);
         }
-        std::cout << "[INFO] Device SDK disconnected." << std::endl;
+        LOG_COMMON("[Hikvision] Device SDK disconnected.");
         m_userID = -1;
     }
 
@@ -224,7 +226,7 @@ void HikvisionCamera::processRealData(DWORD dwDataType, BYTE* pBuffer, DWORD dwB
             PlayM4_SetStreamOpenMode(m_playPort, STREAME_REALTIME);
             if (PlayM4_OpenStream(m_playPort, pBuffer, dwBufSize, 1024 * 1024)) {
                 if (!PlayM4_SetDecCallBack(m_playPort, g_DecCallBack) || !PlayM4_Play(m_playPort, NULL)) {
-                    std::cerr << "[ERROR] PlayM4 Setup failed! Cleaning up port..." << std::endl;
+                    LOG_COMMON("[Hikvision] PlayM4 Setup failed! Cleaning up port...");
                     PlayM4_CloseStream(m_playPort);
                     PlayM4_FreePort(m_playPort);
                     {

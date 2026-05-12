@@ -1,20 +1,10 @@
 #include "anti_collision_app.h"
 
 #include <chrono>
-#include <iostream>
 #include <sstream>
 
 #include "plc_register_map.h"
-#include "utils.h"   // SAFE_LOG: 带时间戳 + 落盘 + 多线程安全
-
-namespace {
-    template <typename... Args>
-    void Log(Args&&... args) {
-        std::ostringstream oss;
-        (oss << ... << args);
-        std::cout << oss.str() << std::endl;
-    }
-}  // namespace
+#include "utils.h"   // LOG_AC / LOG_COMMON / SAFE_LOG: 带时间戳 + 落盘 + 多线程安全
 
 AntiCollisionApp::AntiCollisionApp() = default;
 AntiCollisionApp::~AntiCollisionApp() { Stop(); }
@@ -23,14 +13,14 @@ AntiCollisionApp::~AntiCollisionApp() { Stop(); }
 // Configure
 // =========================================================================
 bool AntiCollisionApp::Configure(const AntiCollisionAppConfig& cfg,
-                                 PlcReceiveBuffer* rcv_buffer,
-                                 PlcSendBuffer*    send_buffer) {
+    PlcReceiveBuffer* rcv_buffer,
+    PlcSendBuffer* send_buffer) {
     if (configured_) {
-        Log("[App] Configure 只能调用一次");
+        LOG_AC("[App] Configure 只能调用一次");
         return false;
     }
     if (running_.load()) {
-        Log("[App] 不能在 Start 之后再 Configure");
+        LOG_AC("[App] 不能在 Start 之后再 Configure");
         return false;
     }
 
@@ -38,17 +28,17 @@ bool AntiCollisionApp::Configure(const AntiCollisionAppConfig& cfg,
     for (int i = 0; i < 4; ++i) {
         const auto& r = cfg.regions[i];
         if (r.quad.size() != 4 || r.frame_width <= 0 || r.frame_height <= 0) {
-            Log("[App] cam", i + 1, " 区域配置无效");
+            LOG_AC("[App] cam" << (i + 1) << " 区域配置无效");
             return false;
         }
     }
     if (cfg.detector.model_path.empty()) {
-        Log("[App] detector.model_path 不能为空");
+        LOG_AC("[App] detector.model_path 不能为空");
         return false;
     }
 
-    cfg_         = cfg;
-    rcv_buffer_  = rcv_buffer;
+    cfg_ = cfg;
+    rcv_buffer_ = rcv_buffer;
     send_buffer_ = send_buffer;
 
     // ---- 装配第三层 (消费端) ----
@@ -84,7 +74,7 @@ bool AntiCollisionApp::Configure(const AntiCollisionAppConfig& cfg,
     }
 
     configured_ = true;
-    Log("[App] 配置完成");
+    LOG_AC("[App] 配置完成");
     return true;
 }
 
@@ -93,11 +83,11 @@ bool AntiCollisionApp::Configure(const AntiCollisionAppConfig& cfg,
 // =========================================================================
 bool AntiCollisionApp::Start() {
     if (!configured_) {
-        Log("[App] 必须先 Configure 再 Start");
+        LOG_AC("[App] 必须先 Configure 再 Start");
         return false;
     }
     if (running_.exchange(true)) {
-        Log("[App] 已经在运行");
+        LOG_AC("[App] 已经在运行");
         return false;
     }
 
@@ -113,7 +103,7 @@ bool AntiCollisionApp::Start() {
     plc_publish_thread_ = std::thread(
         &AntiCollisionApp::PlcPublishLoop, this);
 
-    Log("[App] 已启动");
+    LOG_AC("[App] 已启动");
     return true;
 }
 
@@ -135,7 +125,7 @@ void AntiCollisionApp::Stop() {
     // 共享 buffer 由外部 PlcIoManager 管理, 这里不释放也不置空
     // (但 dangling 风险由外部寿命约定保证: PlcIoManager 必须晚于本 App 析构)
 
-    Log("[App] 已停止");
+    LOG_AC("[App] 已停止");
 }
 
 // =========================================================================
@@ -214,8 +204,8 @@ void AntiCollisionApp::PublishToPlc() {
         slot_conn[kCamToPlcSlot[i]] = conn[i] ? 1 : 0;
     }
     if (sb) {
-        sb->Set(PlcSend::CamSeaEastStatus,  slot_conn[0]);
-        sb->Set(PlcSend::CamSeaWestStatus,  slot_conn[1]);
+        sb->Set(PlcSend::CamSeaEastStatus, slot_conn[0]);
+        sb->Set(PlcSend::CamSeaWestStatus, slot_conn[1]);
         sb->Set(PlcSend::CamLandEastStatus, slot_conn[2]);
         sb->Set(PlcSend::CamLandWestStatus, slot_conn[3]);
     }
@@ -224,26 +214,26 @@ void AntiCollisionApp::PublishToPlc() {
     bool dir_stop[2] = { false, false };
     bool dir_decel[2] = { false, false };
 
-    bool any_stop_seen[2]  = { false, false };
-    bool all_stop_seen[2]  = { true,  true  };
+    bool any_stop_seen[2] = { false, false };
+    bool all_stop_seen[2] = { true,  true };
     bool any_decel_seen[2] = { false, false };
-    bool all_decel_seen[2] = { true,  true  };
-    int  cam_count[2]      = { 0, 0 };
+    bool all_decel_seen[2] = { true,  true };
+    int  cam_count[2] = { 0, 0 };
 
     for (int i = 0; i < 4; ++i) {
         int dir = kCamToDirection[i];
         cam_count[dir]++;
         bool s = (l[i] == AlarmLevel::Stop);
         bool d = (l[i] == AlarmLevel::Decel) || s;
-        any_stop_seen[dir]  = any_stop_seen[dir]  || s;
-        all_stop_seen[dir]  = all_stop_seen[dir]  && s;
+        any_stop_seen[dir] = any_stop_seen[dir] || s;
+        all_stop_seen[dir] = all_stop_seen[dir] && s;
         any_decel_seen[dir] = any_decel_seen[dir] || d;
         all_decel_seen[dir] = all_decel_seen[dir] && d;
     }
 
     for (int dir = 0; dir < 2; ++dir) {
         if (cam_count[dir] == 0) continue;
-        dir_stop[dir]  = kUseOrAggregation ? any_stop_seen[dir]  : all_stop_seen[dir];
+        dir_stop[dir] = kUseOrAggregation ? any_stop_seen[dir] : all_stop_seen[dir];
         dir_decel[dir] = kUseOrAggregation ? any_decel_seen[dir] : all_decel_seen[dir];
     }
 
@@ -264,8 +254,8 @@ void AntiCollisionApp::PublishToPlc() {
         : 0;
 
     if (sb) {
-        sb->Set(PlcSend::StopDir,        stop_code);
-        sb->Set(PlcSend::SpeedLimitDir,  speed_code);
+        sb->Set(PlcSend::StopDir, stop_code);
+        sb->Set(PlcSend::SpeedLimitDir, speed_code);
     }
 
     // ---- 5. 状态变化时打印日志 ----
@@ -274,11 +264,11 @@ void AntiCollisionApp::PublishToPlc() {
             : (c == 1) ? "东侧"
             : (c == 2) ? "西侧"
             : "双向";
-    };
+        };
     if (stop_code != last_stop_code_ || speed_code != last_speed_code_) {
-        SAFE_LOG("[PLC 汇总下发] 急停区域: [" << code_to_zone(stop_code)
+        LOG_AC("[PLC 汇总下发] 急停区域: [" << code_to_zone(stop_code)
             << "] | 减速区域: [" << code_to_zone(speed_code) << "]");
-        last_stop_code_  = stop_code;
+        last_stop_code_ = stop_code;
         last_speed_code_ = speed_code;
     }
 

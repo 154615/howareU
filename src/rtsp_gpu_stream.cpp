@@ -1,11 +1,12 @@
 #include "rtsp_gpu_stream.h"
 
 #include <climits>
-#include <iostream>
 
 #include <opencv2/cudacodec.hpp>
 #include <opencv2/cudaimgproc.hpp>
 #include <opencv2/core/cuda.hpp>
+
+#include "utils.h"   // LOG_COMMON
 
 namespace {
     constexpr int kReopenIntervalMs = 2000;   // 解码器掉了重建间隔
@@ -25,7 +26,7 @@ RtspGpuStream::~RtspGpuStream() {
 
 bool RtspGpuStream::Open(const std::string& rtsp_url, int gpu_device) {
     if (is_running_.exchange(true)) {
-        std::cerr << "[RtspGpuStream] 已经在运行, 忽略重复 Open" << std::endl;
+        LOG_COMMON("[RtspGpuStream] 已经在运行, 忽略重复 Open");
         return true;
     }
     rtsp_url_ = rtsp_url;
@@ -74,7 +75,7 @@ void RtspGpuStream::WorkerLoop() {
         cv::cuda::setDevice(gpu_device_);
     }
     catch (const cv::Exception& e) {
-        std::cerr << "[RtspGpuStream] setDevice 失败: " << e.what() << std::endl;
+        LOG_COMMON("[RtspGpuStream] setDevice 失败: " << e.what());
         is_running_.store(false, std::memory_order_release);
         return;
     }
@@ -84,7 +85,12 @@ void RtspGpuStream::WorkerLoop() {
     cv::cuda::GpuMat gpu_bgr;
     cv::Mat          cpu_bgr;
 
-    auto last_open_attempt = std::chrono::steady_clock::time_point::min();
+    // 用 epoch (= time_point{}) 而不是 time_point::min().
+    // 理由: 后续做 (now - last_open_attempt) 然后 cast 成 int64 毫秒, 而
+    //       time_point::min() 量级是 -INT64_MAX, 减法结果不在 int64 范围 → UB.
+    //       实测会得到接近 INT64_MIN 的负数, 导致 elapsed < kReopenIntervalMs
+    //       恒成立, 死循环 sleep 而不调 createVideoReader.
+    auto last_open_attempt = std::chrono::steady_clock::time_point{};
 
     while (is_running_.load(std::memory_order_acquire)) {
 
@@ -102,17 +108,17 @@ void RtspGpuStream::WorkerLoop() {
             try {
                 reader = cv::cudacodec::createVideoReader(rtsp_url_);
                 if (!reader) {
-                    std::cerr << "[RtspGpuStream] createVideoReader 返回 null: " << rtsp_url_ << std::endl;
+                    LOG_COMMON("[RtspGpuStream] createVideoReader 返回 null: " << rtsp_url_);
                     continue;
                 }
 #if (CV_VERSION_MAJOR > 4) || (CV_VERSION_MAJOR == 4 && CV_VERSION_MINOR >= 5)
                 try { reader->set(cv::cudacodec::ColorFormat::BGR); }
                 catch (...) { /* 老版本忽略 */ }
 #endif
-                std::cout << "[RtspGpuStream] 已打开 GPU 解码器: " << rtsp_url_ << std::endl;
+                LOG_COMMON("[RtspGpuStream] 已打开 GPU 解码器: " << rtsp_url_);
             }
             catch (const cv::Exception& e) {
-                std::cerr << "[RtspGpuStream] 打开失败: " << e.what() << std::endl;
+                LOG_COMMON("[RtspGpuStream] 打开失败: " << e.what());
                 reader.release();
                 is_connected_.store(false, std::memory_order_release);
                 continue;
@@ -125,12 +131,12 @@ void RtspGpuStream::WorkerLoop() {
             ok = reader->nextFrame(gpu_frame);
         }
         catch (const cv::Exception& e) {
-            std::cerr << "[RtspGpuStream] nextFrame 异常: " << e.what() << std::endl;
+            LOG_COMMON("[RtspGpuStream] nextFrame 异常: " << e.what());
             ok = false;
         }
 
         if (!ok || gpu_frame.empty()) {
-            std::cerr << "[RtspGpuStream] 拉帧失败, 准备重连" << std::endl;
+            LOG_COMMON("[RtspGpuStream] 拉帧失败, 准备重连");
             reader.release();
             is_connected_.store(false, std::memory_order_release);
             continue;

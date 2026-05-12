@@ -3,21 +3,10 @@
 #include <algorithm>
 #include <chrono>
 #include <cstring>
-#include <iostream>
 #include <sstream>
 
 #include "plc_register_map.h"   // PlcSend::Heartbeat
-
-namespace {
-
-    template <typename... Args>
-    void Log(Args&&... args) {
-        std::ostringstream oss;
-        (oss << ... << args);
-        std::cout << oss.str() << std::endl;
-    }
-
-}  // namespace
+#include "utils.h"              // LOG_COMMON
 
 // =========================================================================
 // PlcReceiveBuffer
@@ -70,12 +59,12 @@ PlcIoManager::~PlcIoManager() { Stop(); }
 
 bool PlcIoManager::Start() {
     if (running_.exchange(true)) {
-        Log("[PlcIoManager] 已经在运行, 忽略重复 Start");
+        LOG_COMMON("[PlcIoManager] 已经在运行, 忽略重复 Start");
         return false;
     }
 
     if (!cfg_.enable) {
-        Log("[PlcIoManager] enable=false, 不起 IO 线程, Buffer 仅在内存生效");
+        LOG_COMMON("[PlcIoManager] enable=false, 不起 IO 线程, Buffer 仅在内存生效");
         return true;
     }
 
@@ -87,10 +76,10 @@ bool PlcIoManager::Start() {
     rcv_thread_ = std::thread(&PlcIoManager::RcvLoop, this);
     send_thread_ = std::thread(&PlcIoManager::SendLoop, this);
 
-    Log("[PlcIoManager] 已启动 | rcv_ip=", cfg_.rcv_ip,
-        " | send_ip=", cfg_.send_ip,
-        " | rcv=", cfg_.rcv_interval_ms, "ms",
-        " | send=", cfg_.send_interval_ms, "ms");
+    LOG_COMMON("[PlcIoManager] 已启动 | rcv_ip=" << cfg_.rcv_ip
+        << " | send_ip=" << cfg_.send_ip
+        << " | rcv=" << cfg_.rcv_interval_ms << "ms"
+        << " | send=" << cfg_.send_interval_ms << "ms");
     return true;
 }
 
@@ -104,7 +93,7 @@ void PlcIoManager::Stop() {
     plc_send_.reset();
     rcv_connected_.store(false);
     send_connected_.store(false);
-    Log("[PlcIoManager] 已停止");
+    LOG_COMMON("[PlcIoManager] 已停止");
 }
 
 // -------------------------------------------------------------------------
@@ -185,7 +174,7 @@ void PlcIoManager::SendLoop() {
                         // 注: Plc_interact 的 connect_flag 是 private, 通过下次
                         //     get_modbus_data 失败/connect_check 路径自然恢复.
                         //     这里只能间接强制重连 —— 释放并新建 plc_send_.
-                        Log("[PlcIoManager] SendLoop 写入失败, 重置发送连接");
+                        LOG_COMMON("[PlcIoManager] SendLoop 写入失败, 重置发送连接");
                         plc_send_.reset();
                         plc_send_ = std::make_unique<Plc_interact>(cfg_.send_ip);
                     }

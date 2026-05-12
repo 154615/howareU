@@ -144,9 +144,13 @@ struct AntiCollisionConfig {
     std::string snapshot_dir = "./save_log/save_result/";
 
     // 磁盘清理线程要扫的目录列表(retain_days > 0 时使用).
+    // 注: 日志已按通道分目录(anti_collision/anti_lift/common), 这里都列上,
+    //     在防撞 App 内启动的清理线程会一并打扫——避免 lift / common 没人清.
     std::vector<std::string> cleanup_dirs = {
         "./save_log/save_result/",
-        "./save_log/logs/"
+        "./save_log/anti_collision/",
+        "./save_log/anti_lift/",
+        "./save_log/common/"
     };
 };
 
