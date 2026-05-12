@@ -181,8 +181,7 @@ void CameraSource::Start() {
 
         while (is_running_.load()) {
             const bool want = want_connected_.load();
-            const bool sdk_logged_in = (impl_->camera->isStreamConnected()
-                || impl_->camera->isRealPlaying());
+            const bool sdk_logged_in = impl_->camera->isLoggedIn();
             const bool gpu_alive = impl_->gpu_stream->IsStreamConnected();
 
             // ====== 1) Ö÷¶¯¶Ï¿ª ======

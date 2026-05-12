@@ -38,6 +38,8 @@ public:
     void disconnect();
 
     bool isStreamConnected() const;
+    bool isLoggedIn() const { return m_userID >= 0; }
+
     void markDisconnected();
 
     // 仅当 only_login=true 时, 上层可显式拉起 SDK 取流(软解兜底)
