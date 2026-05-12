@@ -4,7 +4,7 @@
 #include <sstream>
 
 #include "modbus_cfg.h"   // IP 默认宏
-#include "utils.h"        // read_String_Json / read_Int_Json / read_Float_Json
+#include "utils.h"        // LoadJsonFile / GetJsonString / GetJsonInt / GetJsonFloat / HasMember / LOG_COMMON
 
 // =========================================================================
 // 内部工具
@@ -25,173 +25,221 @@ namespace {
         return out;
     }
 
-    // 读 4 角点 (用于防撞)
-    std::vector<cv::Point> ReadQuad(const std::string& json_path, int cam_id_1based) {
+    // 读 4 角点 (REGION 子节点)
+    std::vector<cv::Point> ReadQuad(const Json::Value& region_node) {
         std::vector<cv::Point> pts;
         pts.reserve(4);
-        const std::string prefix = "CAM" + std::to_string(cam_id_1based) + "_PT";
         for (int i = 1; i <= 4; ++i) {
-            int x = read_Int_Json(json_path, prefix + std::to_string(i) + "_X");
-            int y = read_Int_Json(json_path, prefix + std::to_string(i) + "_Y");
+            const std::string pref = "PT" + std::to_string(i);
+            int x = GetJsonInt(region_node, pref + "_X", 0);
+            int y = GetJsonInt(region_node, pref + "_Y", 0);
             pts.emplace_back(x, y);
         }
         return pts;
     }
 
-    // 通用: 读单路相机连接信息(适用于 CAMx_ 与 LIFT_CAMx_ 两种前缀)
+    // 共享凭证: COMMON.DEFAULT_CAMERA
+    struct DefaultCamCred {
+        std::string user = "admin";
+        std::string pwd;
+        int         port = 8000;
+    };
+
+    DefaultCamCred ReadDefaultCred(const Json::Value& common_node) {
+        DefaultCamCred d;
+        const Json::Value& def = HasMember(common_node, "DEFAULT_CAMERA")
+            ? common_node["DEFAULT_CAMERA"]
+            : Json::Value(Json::nullValue);
+        d.user = GetJsonString(def, "USER", "admin");
+        d.pwd = GetJsonString(def, "PWD", "");
+        int p = GetJsonInt(def, "PORT", 0);
+        d.port = (p > 0) ? p : 8000;
+        return d;
+    }
+
+    // 通用: 读单路相机连接信息(包括 RTSP URL + 3 个 SDK 用途开关)
     template <typename Entry>
-    Entry ReadCameraGeneric(const std::string& json_path,
-        const std::string& prefix,
-        const std::string& default_user,
-        const std::string& default_pwd,
-        int default_port) {
+    Entry ReadCameraGeneric(const Json::Value& cam_node,
+        const DefaultCamCred& def) {
         Entry e;
-        e.ip = read_String_Json(json_path, prefix + "IP");
+        e.ip = GetJsonString(cam_node, "IP", "");
 
-        int port = read_Int_Json(json_path, prefix + "PORT");
-        e.port = (port > 0) ? port : default_port;
+        int port = GetJsonInt(cam_node, "PORT", 0);
+        e.port = (port > 0) ? port : def.port;
 
-        std::string user = read_String_Json(json_path, prefix + "USER");
-        e.user = user.empty() ? default_user : user;
+        std::string user = GetJsonString(cam_node, "USER", "");
+        e.user = user.empty() ? def.user : user;
 
-        std::string pwd = read_String_Json(json_path, prefix + "PWD");
-        e.pwd = pwd.empty() ? default_pwd : pwd;
+        std::string pwd = GetJsonString(cam_node, "PWD", "");
+        e.pwd = pwd.empty() ? def.pwd : pwd;
 
-        int ch = read_Int_Json(json_path, prefix + "CHANNEL");
+        int ch = GetJsonInt(cam_node, "CHANNEL", 0);
         e.channel = (ch > 0) ? ch : 1;
+
+        e.rtsp_url = GetJsonString(cam_node, "RTSP_URL", "");
+
+        e.support_pan_tilt = (GetJsonInt(cam_node, "SUPPORT_PAN_TILT", 0) != 0);
+        e.support_zoom = (GetJsonInt(cam_node, "SUPPORT_ZOOM", 0) != 0);
+        e.enable_sdk_fallback = (GetJsonInt(cam_node, "ENABLE_SDK_FALLBACK", 0) != 0);
 
         return e;
     }
 
-    // 通用: 读检测器配置(适用于防撞 / 防吊起两种前缀)
-    void ReadDetectorConfig(const std::string& json_path,
-        const std::string& prefix,
-        Yolov8DetectorConfig& d) {
-        d.model_path = read_String_Json(json_path, prefix + "MODEL_PATH");
+    // 通用: 读检测器配置(DETECTOR 子节点)
+    void ReadDetectorConfig(const Json::Value& det_node,
+        Yolov8DetectorConfig& d,
+        TaskType default_task) {
+        d.model_path = GetJsonString(det_node, "MODEL_PATH", d.model_path);
 
-        std::string task = read_String_Json(json_path, prefix + "TASK");
-        d.task = (task == "detect" || task == "Detect")
-            ? TaskType::Detect : TaskType::Seg;
+        std::string task = GetJsonString(det_node, "TASK", "");
+        if (task.empty()) {
+            d.task = default_task;
+        }
+        else {
+            d.task = (task == "detect" || task == "Detect")
+                ? TaskType::Detect : TaskType::Seg;
+        }
 
-        int w = read_Int_Json(json_path, prefix + "IMG_W");
-        int h = read_Int_Json(json_path, prefix + "IMG_H");
+        int w = GetJsonInt(det_node, "IMG_W", 0);
+        int h = GetJsonInt(det_node, "IMG_H", 0);
         if (w > 0) d.img_width = w;
         if (h > 0) d.img_height = h;
 
-        float conf = read_Float_Json(json_path, prefix + "CONF");
-        float nms = read_Float_Json(json_path, prefix + "NMS");
-        float msk = read_Float_Json(json_path, prefix + "MASK");
+        float conf = GetJsonFloat(det_node, "CONF", 0.0f);
+        float nms = GetJsonFloat(det_node, "NMS", 0.0f);
+        float msk = GetJsonFloat(det_node, "MASK", 0.0f);
         if (conf > 0.0f) d.conf_threshold = conf;
         if (nms > 0.0f) d.nms_threshold = nms;
         if (msk > 0.0f) d.mask_threshold = msk;
 
-        std::string classes = read_String_Json(json_path, prefix + "CLASSES");
+        std::string classes = GetJsonString(det_node, "CLASSES", "");
         if (!classes.empty()) d.class_names = SplitCsv(classes);
 
-        int use_cuda = read_Int_Json(json_path, prefix + "USE_CUDA");
-        if (use_cuda == 0)      d.use_cuda = false;
-        else if (use_cuda == 1) d.use_cuda = true;
-
-        int cuda_id = read_Int_Json(json_path, prefix + "CUDA_ID");
-        if (cuda_id >= 0) d.cuda_id = cuda_id;
+        // USE_CUDA / CUDA_ID: 不存在时保持默认
+        if (HasMember(det_node, "USE_CUDA")) {
+            d.use_cuda = (GetJsonInt(det_node, "USE_CUDA", 1) != 0);
+        }
+        if (HasMember(det_node, "CUDA_ID")) {
+            int cuda_id = GetJsonInt(det_node, "CUDA_ID", 0);
+            if (cuda_id >= 0) d.cuda_id = cuda_id;
+        }
     }
 
     // -------------------------------------------------------------------------
-    // 子加载器: PLC IO
+    // 子加载器: PLC IO  ( COMMON.PLC )
     // -------------------------------------------------------------------------
-    void LoadPlcIo(const std::string& json_path, PlcIoManager::Config& out) {
+    void LoadPlcIo(const Json::Value& common_node,
+        PlcIoManager::Config& out) {
         std::string default_ip = IP;   // modbus_cfg.h 宏
 
-        std::string rcv = read_String_Json(json_path, "PLC_RCV_IP");
-        std::string send = read_String_Json(json_path, "PLC_SEND_IP");
+        const Json::Value& plc = HasMember(common_node, "PLC")
+            ? common_node["PLC"]
+            : Json::Value(Json::nullValue);
+
+        std::string rcv = GetJsonString(plc, "RCV_IP", "");
+        std::string send = GetJsonString(plc, "SEND_IP", "");
 
         out.rcv_ip = rcv.empty() ? default_ip : rcv;
         out.send_ip = send.empty() ? out.rcv_ip : send;
 
-        int rcv_iv = read_Int_Json(json_path, "PLC_RCV_INTERVAL_MS");
+        int rcv_iv = GetJsonInt(plc, "RCV_INTERVAL_MS", 0);
         if (rcv_iv > 0) out.rcv_interval_ms = rcv_iv;
 
-        int snd_iv = read_Int_Json(json_path, "PLC_SEND_INTERVAL_MS");
+        int snd_iv = GetJsonInt(plc, "SEND_INTERVAL_MS", 0);
         if (snd_iv > 0) out.send_interval_ms = snd_iv;
 
-        // PLC_ENABLE: 0 → 不连 PLC, 走纯本地模式
-        int en = read_Int_Json(json_path, "PLC_ENABLE");
-        // 0 显式关; 其他(含 1 / 缺失) 保持默认 true
-        if (en == 0) out.enable = false;
+        // ENABLE: 0 → 不连 PLC, 走纯本地模式
+        if (HasMember(plc, "ENABLE")) {
+            out.enable = (GetJsonInt(plc, "ENABLE", 1) != 0);
+        }
     }
 
     // -------------------------------------------------------------------------
-    // 子加载器: 防撞 App
-    //   返回 false 表示必填项缺失
+    // 子加载器: 防撞 App ( ANTI_COLLISION )
     // -------------------------------------------------------------------------
-    bool LoadAntiCollision(const std::string& json_path,
+    bool LoadAntiCollision(const Json::Value& ac_node,
+        const DefaultCamCred& def,
         AntiCollisionAppConfig& out) {
-        // ---- 检测器 ----
-        ReadDetectorConfig(json_path, "DETECTOR_", out.detector);
-        // 兼容旧字段 MODEL_PATH
-        if (out.detector.model_path.empty()) {
-            out.detector.model_path = read_String_Json(json_path, "MODEL_PATH");
+        if (!ac_node.isObject()) {
+            LOG_COMMON("[ConfigLoader] ANTI_COLLISION 节点缺失或不是 object");
+            return false;
         }
 
-        // ---- 防撞业务参数 ----
-        out.split_ratio = read_Float_Json(json_path, "SPLIT_RATIO");
-        out.retain_days = read_Int_Json(json_path, "MAX_RETAIN_DAYS");
-        out.enable_debug_show = (read_Int_Json(json_path, "DEBUG_SHOW") != 0);
+        // ---- 检测器 ----
+        const Json::Value& det = HasMember(ac_node, "DETECTOR")
+            ? ac_node["DETECTOR"]
+            : Json::Value(Json::nullValue);
+        ReadDetectorConfig(det, out.detector, /*default_task=*/TaskType::Seg);
 
-        // ---- 共享凭证 ----
-        std::string default_user = read_String_Json(json_path, "DEFAULT_USER");
-        std::string default_pwd = read_String_Json(json_path, "DEFAULT_PWD");
-        int         default_port = read_Int_Json(json_path, "DEFAULT_PORT");
-        if (default_user.empty()) default_user = "admin";
-        if (default_port <= 0)    default_port = 8000;
+        // ---- 业务参数 ----
+        const Json::Value& biz = HasMember(ac_node, "BUSINESS")
+            ? ac_node["BUSINESS"]
+            : Json::Value(Json::nullValue);
+
+        float split = GetJsonFloat(biz, "SPLIT_RATIO", 0.0f);
+        if (split > 0.0f) out.split_ratio = split;
+
+        out.retain_days = GetJsonInt(biz, "MAX_RETAIN_DAYS", out.retain_days);
+        out.enable_debug_show = (GetJsonInt(biz, "DEBUG_SHOW", 0) != 0);
+
+        int interval = GetJsonInt(biz, "INTERVAL", 0);
+        if (interval > 0) out.poll_interval_ms = interval;
+
+        int plc_pub = GetJsonInt(biz, "PLC_PUBLISH_INTERVAL_MS", 0);
+        if (plc_pub > 0) out.plc_publish_interval_ms = plc_pub;
 
         // ---- 4 路相机 ----
-        for (int i = 0; i < 4; ++i) {
-            const std::string prefix = "CAM" + std::to_string(i + 1) + "_";
-            out.cameras[i] = ReadCameraGeneric<CameraEntry>(
-                json_path, prefix, default_user, default_pwd, default_port);
-        }
-
-        // ---- 4 路区域 ----
-        int W = static_cast<int>(read_Float_Json(json_path, "RES_X"));
-        int H = static_cast<int>(read_Float_Json(json_path, "RES_Y"));
+        int W = static_cast<int>(GetJsonFloat(biz, "RES_X", 0.0f));
+        int H = static_cast<int>(GetJsonFloat(biz, "RES_Y", 0.0f));
         if (W <= 0) W = 1920;
         if (H <= 0) H = 1080;
 
         for (int i = 0; i < 4; ++i) {
-            out.regions[i].quad = ReadQuad(json_path, i + 1);
+            const std::string key = "CAM" + std::to_string(i + 1);
+            if (!HasMember(ac_node, key)) {
+                LOG_COMMON("[ConfigLoader] ANTI_COLLISION." << key << " 缺失");
+                return false;
+            }
+            const Json::Value& cam = ac_node[key];
+            out.cameras[i] = ReadCameraGeneric<CameraEntry>(cam, def);
+
+            // 区域
+            const Json::Value& region = HasMember(cam, "REGION")
+                ? cam["REGION"]
+                : Json::Value(Json::nullValue);
+            out.regions[i].quad = ReadQuad(region);
             out.regions[i].frame_width = W;
             out.regions[i].frame_height = H;
         }
 
-        // ---- 取流参数 ----
-        int interval = read_Int_Json(json_path, "INTERVAL");
-        if (interval > 0) out.poll_interval_ms = interval;
-
-        // ---- PLC 发布周期(写入 send_buffer 的频率, 不是 modbus 下发频率) ----
-        int plc_pub_interval = read_Int_Json(json_path, "PLC_PUBLISH_INTERVAL_MS");
-        if (plc_pub_interval > 0) out.plc_publish_interval_ms = plc_pub_interval;
-
         // ---- 校验 ----
         if (out.detector.model_path.empty()) {
-            LOG_COMMON("[ConfigLoader] DETECTOR_MODEL_PATH 为空");
+            LOG_COMMON("[ConfigLoader] ANTI_COLLISION.DETECTOR.MODEL_PATH 为空");
             return false;
         }
         if (out.detector.class_names.empty()) {
-            LOG_COMMON("[ConfigLoader] DETECTOR_CLASSES 为空");
+            LOG_COMMON("[ConfigLoader] ANTI_COLLISION.DETECTOR.CLASSES 为空");
             return false;
         }
         for (int i = 0; i < 4; ++i) {
-            if (out.cameras[i].ip.empty()) {
-                LOG_COMMON("[ConfigLoader] CAM" << (i + 1) << "_IP 为空");
+            const auto& cam = out.cameras[i];
+            if (cam.ip.empty()) {
+                LOG_COMMON("[ConfigLoader] ANTI_COLLISION.CAM" << (i + 1) << ".IP 为空");
                 return false;
             }
-            if (out.cameras[i].pwd.empty()) {
-                LOG_COMMON("[ConfigLoader] CAM" << (i + 1) << "_PWD 为空");
+            // 只有需要登录 SDK 时才校验 pwd
+            const bool need_sdk = cam.support_pan_tilt
+                || cam.support_zoom
+                || cam.enable_sdk_fallback;
+            if (need_sdk && cam.pwd.empty()) {
+                LOG_COMMON("[ConfigLoader] ANTI_COLLISION.CAM" << (i + 1)
+                    << ".PWD 为空, 但 SUPPORT_PAN_TILT/SUPPORT_ZOOM/ENABLE_SDK_FALLBACK"
+                    << " 至少一项开启, 必须填密码");
                 return false;
             }
             if (out.regions[i].quad.size() != 4) {
-                LOG_COMMON("[ConfigLoader] cam" << (i + 1) << " 角点缺失");
+                LOG_COMMON("[ConfigLoader] ANTI_COLLISION.CAM" << (i + 1)
+                    << ".REGION 角点缺失");
                 return false;
             }
         }
@@ -199,89 +247,104 @@ namespace {
     }
 
     // -------------------------------------------------------------------------
-    // 子加载器: 防吊起 App
+    // 子加载器: 防吊起 App ( ANTI_LIFT )
     // -------------------------------------------------------------------------
-    bool LoadAntiLift(const std::string& json_path, AntiLiftAppConfig& out) {
-        // ---- 检测器(LIFT_DETECTOR_*) ----
-        ReadDetectorConfig(json_path, "LIFT_DETECTOR_", out.algo.detector);
-        // 防吊起默认是 Detect 任务
-        std::string task = read_String_Json(json_path, "LIFT_DETECTOR_TASK");
-        if (task.empty()) {
-            out.algo.detector.task = TaskType::Detect;
+    bool LoadAntiLift(const Json::Value& lift_node,
+        const DefaultCamCred& def,
+        AntiLiftAppConfig& out) {
+        if (!lift_node.isObject()) {
+            LOG_COMMON("[ConfigLoader] ANTI_LIFT 节点缺失或不是 object");
+            return false;
         }
 
-        // ---- 阈值 ----
+        // ---- 检测器(默认 detect) ----
+        const Json::Value& det = HasMember(lift_node, "DETECTOR")
+            ? lift_node["DETECTOR"]
+            : Json::Value(Json::nullValue);
+        ReadDetectorConfig(det, out.algo.detector, /*default_task=*/TaskType::Detect);
+
+        // ---- 算法阈值 ----
+        const Json::Value& algo_lim = HasMember(lift_node, "ALGO_LIMIT")
+            ? lift_node["ALGO_LIMIT"]
+            : Json::Value(Json::nullValue);
         int v;
-        v = read_Int_Json(json_path, "LIFT_LIMIT_HOLE_Y");
+        v = GetJsonInt(algo_lim, "HOLE_Y", 0);
         if (v > 0) out.algo.limit_hole_y = v;
-        v = read_Int_Json(json_path, "LIFT_LIMIT_WHEEL_Y");
+        v = GetJsonInt(algo_lim, "WHEEL_Y", 0);
         if (v > 0) out.algo.limit_wheel_y = v;
-        v = read_Int_Json(json_path, "LIFT_LIMIT_HORIZON_LEFT");
+        v = GetJsonInt(algo_lim, "HORIZON_LEFT", 0);
         if (v > 0) out.algo.limit_horizon_left = v;
-        v = read_Int_Json(json_path, "LIFT_LIMIT_ROTATE_LIFT_PLT");
+        v = GetJsonInt(algo_lim, "ROTATE_LIFT_PLT", 0);
         if (v > 0) out.algo.limit_rotate_lift_plt = v;
-        v = read_Int_Json(json_path, "LIFT_LIMIT_ROTATE_LIFT_WHEEL");
+        v = GetJsonInt(algo_lim, "ROTATE_LIFT_WHEEL", 0);
         if (v > 0) out.algo.limit_rotate_lift_wheel = v;
 
-        v = read_Int_Json(json_path, "LIFT_LIMIT_HOIST_POSITION");
-        out.limit_hoist_pos = v;
-        v = read_Int_Json(json_path, "LIFT_LIMIT_TROLLEY_POSITION");
-        out.limit_trolley_pos = v;
+        // ---- PLC 启停阈值 ----
+        const Json::Value& plc_lim = HasMember(lift_node, "PLC_LIMIT")
+            ? lift_node["PLC_LIMIT"]
+            : Json::Value(Json::nullValue);
+        out.limit_hoist_pos = GetJsonInt(plc_lim, "HOIST_POSITION", out.limit_hoist_pos);
+        out.limit_trolley_pos = GetJsonInt(plc_lim, "TROLLEY_POSITION", out.limit_trolley_pos);
 
         // ---- 录像 ----
-        int en_rec = read_Int_Json(json_path, "LIFT_ENABLE_RECORD");
-        if (en_rec == 0)      out.algo.enable_record = false;
-        else if (en_rec == 1) out.algo.enable_record = true;
-
-        int fps = read_Int_Json(json_path, "LIFT_RECORD_FPS");
+        const Json::Value& rec = HasMember(lift_node, "RECORD")
+            ? lift_node["RECORD"]
+            : Json::Value(Json::nullValue);
+        if (HasMember(rec, "ENABLE")) {
+            out.algo.enable_record = (GetJsonInt(rec, "ENABLE", 1) != 0);
+        }
+        int fps = GetJsonInt(rec, "FPS", 0);
         if (fps > 0) out.algo.record_fps = fps;
-
-        std::string rec_dir = read_String_Json(json_path, "LIFT_RECORD_DIR");
+        std::string rec_dir = GetJsonString(rec, "DIR", "");
         if (!rec_dir.empty()) out.algo.record_dir = rec_dir;
 
         // ---- 调试 ----
         out.algo.enable_debug_show =
-            (read_Int_Json(json_path, "LIFT_DEBUG_SHOW") != 0);
-
-        // ---- 共享凭证(复用防撞那一组) ----
-        std::string default_user = read_String_Json(json_path, "DEFAULT_USER");
-        std::string default_pwd = read_String_Json(json_path, "DEFAULT_PWD");
-        int         default_port = read_Int_Json(json_path, "DEFAULT_PORT");
-        if (default_user.empty()) default_user = "admin";
-        if (default_port <= 0)    default_port = 8000;
-
-        // ---- 2 路相机(LIFT_CAMx_*) ----
-        for (int i = 0; i < 2; ++i) {
-            const std::string prefix = "LIFT_CAM" + std::to_string(i + 1) + "_";
-            out.cameras[i] = ReadCameraGeneric<AntiLiftCameraEntry>(
-                json_path, prefix, default_user, default_pwd, default_port);
-            // RTSP URL 字段(可选, 留空则后端按海康主码流自动拼)
-            out.cameras[i].rtsp_url =
-                read_String_Json(json_path, prefix + "RTSP_URL");
-        }
+            (GetJsonInt(lift_node, "DEBUG_SHOW", 0) != 0);
 
         // ---- 取流节拍 ----
-        int interval = read_Int_Json(json_path, "INTERVAL");
+        int interval = GetJsonInt(lift_node, "INTERVAL", 0);
         if (interval > 0) out.poll_interval_ms = interval;
+
+        // ---- 2 路相机 ----
+        for (int i = 0; i < 2; ++i) {
+            const std::string key = "CAM" + std::to_string(i + 1);
+            if (!HasMember(lift_node, key)) {
+                LOG_COMMON("[ConfigLoader] ANTI_LIFT." << key << " 缺失");
+                return false;
+            }
+            out.cameras[i] = ReadCameraGeneric<AntiLiftCameraEntry>(
+                lift_node[key], def);
+        }
 
         // ---- 校验 ----
         if (out.algo.detector.model_path.empty()) {
-            LOG_COMMON("[ConfigLoader] LIFT_DETECTOR_MODEL_PATH 为空");
+            LOG_COMMON("[ConfigLoader] ANTI_LIFT.DETECTOR.MODEL_PATH 为空");
             return false;
         }
         if (out.algo.detector.class_names.empty()) {
-            LOG_COMMON("[ConfigLoader] LIFT_DETECTOR_CLASSES 为空");
+            LOG_COMMON("[ConfigLoader] ANTI_LIFT.DETECTOR.CLASSES 为空");
             return false;
         }
         for (int i = 0; i < 2; ++i) {
-            if (out.cameras[i].ip.empty()) {
-                LOG_COMMON("[ConfigLoader] LIFT_CAM" << (i + 1) << "_IP 为空");
+            const auto& cam = out.cameras[i];
+            if (cam.ip.empty()) {
+                LOG_COMMON("[ConfigLoader] ANTI_LIFT.CAM" << (i + 1) << ".IP 为空");
                 return false;
             }
-            // 允许只填 rtsp_url 不填 pwd 的情况(通用 RTSP 源)
-            if (out.cameras[i].pwd.empty() && out.cameras[i].rtsp_url.empty()) {
-                LOG_COMMON("[ConfigLoader] LIFT_CAM" << (i + 1)
-                    << " pwd 和 rtsp_url 都为空");
+            const bool need_sdk = cam.support_pan_tilt
+                || cam.support_zoom
+                || cam.enable_sdk_fallback;
+            // 取流必须有路径: rtsp_url 非空 或 (SDK 兜底开启 + pwd 非空)
+            if (cam.rtsp_url.empty() && cam.pwd.empty()) {
+                LOG_COMMON("[ConfigLoader] ANTI_LIFT.CAM" << (i + 1)
+                    << " RTSP_URL 和 PWD 都为空, 无法取流");
+                return false;
+            }
+            if (need_sdk && cam.pwd.empty()) {
+                LOG_COMMON("[ConfigLoader] ANTI_LIFT.CAM" << (i + 1)
+                    << ".PWD 为空, 但 SUPPORT_PAN_TILT/SUPPORT_ZOOM/ENABLE_SDK_FALLBACK"
+                    << " 至少一项开启, 必须填密码");
                 return false;
             }
         }
@@ -295,24 +358,48 @@ namespace {
 // 顶层接口
 // =========================================================================
 bool LoadConfigFromJson(const std::string& json_path, AppBundleConfig& out) {
-    // ---- App 总开关 ----
-    int en_ac = read_Int_Json(json_path, "ENABLE_ANTI_COLLISION");
-    int en_lift = read_Int_Json(json_path, "ENABLE_ANTI_LIFT");
-    if (en_ac == 0)   out.enable_anti_collision = false;
-    if (en_lift == 0) out.enable_anti_lift = false;
+    Json::Value root;
+    if (!LoadJsonFile(json_path, root)) {
+        LOG_COMMON("[ConfigLoader] 无法加载 " << json_path);
+        return false;
+    }
 
-    // ---- PLC IO(无论哪个 App 启用都需要) ----
-    LoadPlcIo(json_path, out.plc_io);
+    // ---- COMMON ----
+    const Json::Value& common_node = HasMember(root, "COMMON")
+        ? root["COMMON"]
+        : Json::Value(Json::nullValue);
 
-    // ---- 各 App 单独加载 ----
+    // App 总开关
+    if (HasMember(common_node, "ENABLE_ANTI_COLLISION")) {
+        out.enable_anti_collision =
+            (GetJsonInt(common_node, "ENABLE_ANTI_COLLISION", 1) != 0);
+    }
+    if (HasMember(common_node, "ENABLE_ANTI_LIFT")) {
+        out.enable_anti_lift =
+            (GetJsonInt(common_node, "ENABLE_ANTI_LIFT", 1) != 0);
+    }
+
+    // PLC IO
+    LoadPlcIo(common_node, out.plc_io);
+
+    // 共享凭证
+    const DefaultCamCred def_cred = ReadDefaultCred(common_node);
+
+    // ---- 各 App ----
     if (out.enable_anti_collision) {
-        if (!LoadAntiCollision(json_path, out.anti_collision)) {
+        const Json::Value& ac = HasMember(root, "ANTI_COLLISION")
+            ? root["ANTI_COLLISION"]
+            : Json::Value(Json::nullValue);
+        if (!LoadAntiCollision(ac, def_cred, out.anti_collision)) {
             LOG_COMMON("[ConfigLoader] 防撞 App 配置失败");
             return false;
         }
     }
     if (out.enable_anti_lift) {
-        if (!LoadAntiLift(json_path, out.anti_lift)) {
+        const Json::Value& lift = HasMember(root, "ANTI_LIFT")
+            ? root["ANTI_LIFT"]
+            : Json::Value(Json::nullValue);
+        if (!LoadAntiLift(lift, def_cred, out.anti_lift)) {
             LOG_COMMON("[ConfigLoader] 防吊起 App 配置失败");
             return false;
         }
@@ -328,18 +415,24 @@ bool LoadConfigFromJson(const std::string& json_path, AppBundleConfig& out) {
 
     if (out.enable_anti_collision) {
         for (int i = 0; i < 4; ++i) {
+            const auto& c = out.anti_collision.cameras[i];
             LOG_COMMON("    AC cam" << (i + 1)
-                << " IP=" << out.anti_collision.cameras[i].ip
-                << ":" << out.anti_collision.cameras[i].port
-                << " ch=" << out.anti_collision.cameras[i].channel);
+                << " IP=" << c.ip << ":" << c.port
+                << " ch=" << c.channel
+                << " pan_tilt=" << (c.support_pan_tilt ? 1 : 0)
+                << " zoom=" << (c.support_zoom ? 1 : 0)
+                << " fallback=" << (c.enable_sdk_fallback ? 1 : 0));
         }
     }
     if (out.enable_anti_lift) {
         for (int i = 0; i < 2; ++i) {
+            const auto& c = out.anti_lift.cameras[i];
             LOG_COMMON("    LIFT cam" << (i + 1)
-                << " IP=" << out.anti_lift.cameras[i].ip
-                << ":" << out.anti_lift.cameras[i].port
-                << " ch=" << out.anti_lift.cameras[i].channel);
+                << " IP=" << c.ip << ":" << c.port
+                << " ch=" << c.channel
+                << " pan_tilt=" << (c.support_pan_tilt ? 1 : 0)
+                << " zoom=" << (c.support_zoom ? 1 : 0)
+                << " fallback=" << (c.enable_sdk_fallback ? 1 : 0));
         }
     }
     return true;

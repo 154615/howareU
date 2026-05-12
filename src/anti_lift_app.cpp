@@ -64,6 +64,9 @@ bool AntiLiftApp::Configure(const AntiLiftAppConfig& cfg,
         s_cfg.pwd = cfg_.cameras[i].pwd;
         s_cfg.channel = cfg_.cameras[i].channel;
         s_cfg.rtsp_url = cfg_.cameras[i].rtsp_url;
+        s_cfg.support_pan_tilt = cfg_.cameras[i].support_pan_tilt;
+        s_cfg.support_zoom = cfg_.cameras[i].support_zoom;
+        s_cfg.enable_sdk_fallback = cfg_.cameras[i].enable_sdk_fallback;
         s_cfg.cam_index = i;
         s_cfg.poll_interval_ms = cfg_.poll_interval_ms;
         s_cfg.reconnect_interval_ms = cfg_.reconnect_interval_ms;

@@ -68,6 +68,28 @@ struct CameraSourceConfig {
     std::string rtsp_url;
     int         gpu_device = 0;             // CUDA 设备号(多卡时用)
 
+    // ===== 海康 SDK 登录用途(每路相机独立配置) =====
+    // 控制是否调用 HikvisionCamera::connect, 三者只要任一为 true 就登录 SDK,
+    // 全部为 false 时彻底不调海康 SDK(适用于无 PTZ 能力或非海康的通用 RTSP 源).
+    //
+    //   support_pan_tilt     该路相机是否支持云台旋转
+    //   support_zoom         该路相机是否支持光学变焦
+    //   enable_sdk_fallback  GPU 解码失败时, 是否切到 SDK 软解兜底
+    //
+    // 行为说明:
+    //   - support_pan_tilt 决定 IPtzControl::HasPan() 的返回值;
+    //     置 false 时 Move/MoveTo 返回 false, 不会向 SDK 下发转动指令.
+    //   - support_zoom 决定 IPtzControl::HasZoom() 的返回值;
+    //     置 false 时 Zoom() 返回 false.
+    //   - 三者都为 false 时, Ptz() 返回 nullptr, 上层 if(auto* p = src->Ptz())
+    //     自然跳过云台调用. 同时也不会做 SDK 软解兜底, GPU 挂了就只能等
+    //     RtspGpuStream 自己重连恢复.
+    //   - 只要任意一个为 true, 就会 connect(only_login=true) 登录 SDK
+    //     (PTZ 命令和软解兜底共用同一份登录会话).
+    bool        support_pan_tilt = false;
+    bool        support_zoom = false;
+    bool        enable_sdk_fallback = false;
+
     // ===== 轮询与重连 =====
     int         poll_interval_ms = 33;    // 主循环节拍, 33ms ≈ 30Hz
     int         reconnect_interval_ms = 3000;  // 整体重连最小间隔
@@ -176,10 +198,13 @@ public:
     // 返回 PTZ 控制句柄.
     // 返回值:
     //     非空指针 ── 生命周期与本对象绑定; 调用方不负责释放
-    //     nullptr  ── 该路不支持 PTZ(目前所有海康球机都支持)
+    //     nullptr  ── 该路不支持 PTZ; 当 cfg.support_pan_tilt 和
+    //                 cfg.support_zoom 都为 false 时返回此值.
     //
-    // 注: 即使取流处于 SDK 软解兜底状态, PTZ 仍然可用 —— 二者通过同一
-    //     份 SDK 登录共存. 取流挂掉不影响 PTZ.
+    // 注:
+    //   - 即使取流处于 SDK 软解兜底状态, PTZ 仍然可用 —— 两者共用一份 SDK 登录.
+    //   - 即使 Ptz() 非空, 也要进一步用 HasPan()/HasZoom() 区分细分能力.
+    //     例如某路只支持变焦不支持转动时, HasPan()==false, Move()/MoveTo() 失败.
     IPtzControl* Ptz();
 
 private:

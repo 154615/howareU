@@ -16,17 +16,56 @@
 uint16_t int2uint16_t(int v);
 // float保留两位小数转uint16，float整数部分需要小于100
 uint16_t float2uint16_t(float v);
-// 
+//
 
 void Log(std::string s);
 void Log_no_date(std::string s);
 
 
-// 读取Json文件，参数：JSON文件名，键名
+// ============================================================================
+// JSON 读取接口
+// ----------------------------------------------------------------------------
+// 1) 新接口(推荐): 基于 Json::Value 节点
+//    - 适合多级结构, 一次 LoadJsonFile 把整棵树读进内存, 后续按节点链式取值
+//    - 提供 Has* 系列做"字段是否存在"检测, 区分 "未配置" 与 "配置为 0/空"
+//
+// 2) 旧接口(兼容层): 按 key 名扁平读
+//    - 内部转调新接口实现, 每次都重新打开文件 → 仅供老代码兼容用
+//    - 新代码请用 1) 的接口
+// ============================================================================
+
+// ---- 新接口: 节点式 ----
+
+// 把整份 json 读到 root. 失败返回 false 并打印原因(LOG_COMMON).
+bool LoadJsonFile(const std::string& json_path, Json::Value& root);
+
+// 节点上"字段是否存在"检测. node 不是 object 或不含 key 都返回 false.
+bool HasMember(const Json::Value& node, const std::string& key);
+
+// 节点上按 key 取值, 不存在/类型不对时返回 def_value.
+// 不会 throw, 不会 LOG_COMMON. 调用方需要"必填校验"时请配合 HasMember 用.
+std::string GetJsonString(const Json::Value& node,
+    const std::string& key,
+    const std::string& def_value = "");
+int         GetJsonInt(const Json::Value& node,
+    const std::string& key,
+    int def_value = 0);
+float       GetJsonFloat(const Json::Value& node,
+    const std::string& key,
+    float def_value = 0.0f);
+bool        GetJsonBool(const Json::Value& node,
+    const std::string& key,
+    bool def_value = false);
+
+// ---- 旧接口(保留): 按 key 扁平读 ----
+// 内部实现已切到新接口, 每次调用会重新打开文件读整棵树, 性能比新接口差.
+// 新代码不要再用这几个.
 std::string read_String_Json(std::string json_file, std::string root_name);
-int read_Int_Json(std::string json_file, std::string root_name);
-float read_Float_Json(std::string json_file, std::string root_name);
-void write_Float_Json(std::string jsonFileName, std::string root_name, std::string root_name2, float data);
+int         read_Int_Json(std::string json_file, std::string root_name);
+float       read_Float_Json(std::string json_file, std::string root_name);
+void        write_Float_Json(std::string jsonFileName, std::string root_name,
+    std::string root_name2, float data);
+
 
 int getFileNumInData(std::string path);
 std::string get_current_time();

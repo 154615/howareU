@@ -7,11 +7,14 @@
 #include "plc_io.h"
 
 // =========================================================================
-// config_loader.h —— 配置加载器: 从 json 文件读出全部 App 配置
+// config_loader.h —— 配置加载器: 从分级 json 文件读出全部 App 配置
 // -------------------------------------------------------------------------
 // 模块定位:
 //   纯工具函数; 不持有任何状态. 把 json 字段名/解析细节从 main 里抽出来,
 //   未来切换 yaml / 命令行参数 / 远程下发只动这一处.
+//
+// 2026-05 重构: JSON 由扁平结构(CAM1_IP / DETECTOR_MODEL_PATH ...) 改为
+// 分级结构(COMMON / ANTI_COLLISION / ANTI_LIFT), 详见下方字段约定.
 // -------------------------------------------------------------------------
 
 
@@ -21,7 +24,7 @@
 struct AppBundleConfig {
     // 是否启用各 App. 测试时可以单独开/关
     bool enable_anti_collision = true;
-    bool enable_anti_lift      = true;
+    bool enable_anti_lift = true;
 
     // 各模块配置
     PlcIoManager::Config       plc_io;          // PLC 接收/发送配置
@@ -31,73 +34,59 @@ struct AppBundleConfig {
 
 
 // -------------------------------------------------------------------------
-// json 字段约定(全大写 + 下划线)
+// JSON 字段约定(分级)
 // -------------------------------------------------------------------------
 //
-// === PLC 通讯 ===
-//   "PLC_RCV_IP"           string  读取目的 IP, 缺省走 modbus_cfg.h 的 IP 宏
-//   "PLC_SEND_IP"          string  写入目的 IP, 缺省同 PLC_RCV_IP.
-//                                  测试时填 "127.0.0.1" 实现"读真PLC, 写本地观察"
-//   "PLC_RCV_INTERVAL_MS"  int     读取周期, 默认 50
-//   "PLC_SEND_INTERVAL_MS" int     写入周期, 默认 50
-//   "PLC_ENABLE"           int     0/1, 是否启用 PLC IO 线程, 默认 1
+// 整体结构:
+//   {
+//     "COMMON": { ... },
+//     "ANTI_COLLISION": { ... },
+//     "ANTI_LIFT": { ... }
+//   }
 //
-// === App 总开关 ===
-//   "ENABLE_ANTI_COLLISION"   int  0/1, 默认 1
-//   "ENABLE_ANTI_LIFT"        int  0/1, 默认 1
+// === COMMON ===
+//   ENABLE_ANTI_COLLISION    int   0/1, 默认 1
+//   ENABLE_ANTI_LIFT         int   0/1, 默认 1
 //
-// === 防撞 - 检测器 ===
-//   "DETECTOR_MODEL_PATH"  string  必填(兼容旧字段 "MODEL_PATH")
-//   "DETECTOR_TASK"        string  "detect" 或 "seg", 默认 "seg"
-//   "DETECTOR_IMG_W"       int     默认 640
-//   "DETECTOR_IMG_H"       int     默认 640
-//   "DETECTOR_CONF"        float   默认 0.25
-//   "DETECTOR_NMS"         float   默认 0.7
-//   "DETECTOR_MASK"        float   默认 0.8 (仅 seg)
-//   "DETECTOR_CLASSES"     string  逗号分隔, 必填
-//   "DETECTOR_USE_CUDA"    int     0/1, 默认 1
-//   "DETECTOR_CUDA_ID"     int     默认 0
+//   PLC: {
+//     ENABLE                 int   0/1, 默认 1
+//     RCV_IP                 string  默认走 modbus_cfg.h 的 IP 宏
+//     SEND_IP                string  默认同 RCV_IP
+//     RCV_INTERVAL_MS        int   默认 50
+//     SEND_INTERVAL_MS       int   默认 50
+//   }
 //
-// === 防撞 - 业务 ===
-//   "SPLIT_RATIO"          float   默认 0.5
-//   "MAX_RETAIN_DAYS"      int     截图保留天数
-//   "DEBUG_SHOW"           int     0/1
-//   "INTERVAL"             int     poll 节拍 ms, 默认 33
-//   "RES_X" / "RES_Y"      float   默认 1920x1080
+//   DEFAULT_CAMERA: {
+//     USER                   string  默认 "admin"
+//     PWD                    string
+//     PORT                   int     默认 8000
+//   }
 //
-// === 防撞 - 相机连接(共享凭证) ===
-//   "DEFAULT_USER" / "DEFAULT_PWD" / "DEFAULT_PORT"
+// === ANTI_COLLISION ===
+//   DETECTOR: { MODEL_PATH(必填), CLASSES(必填, 逗号分隔),
+//               TASK("detect"|"seg"), IMG_W/IMG_H, CONF, NMS, MASK,
+//               USE_CUDA(0/1), CUDA_ID }
+//   BUSINESS: { SPLIT_RATIO, MAX_RETAIN_DAYS, DEBUG_SHOW, INTERVAL,
+//               RES_X, RES_Y, PLC_PUBLISH_INTERVAL_MS }
+//   CAM1..CAM4: {
+//     IP(必填), PORT, USER, PWD, CHANNEL, RTSP_URL,
+//     SUPPORT_PAN_TILT(0/1, 默认 0),
+//     SUPPORT_ZOOM(0/1, 默认 0),
+//     ENABLE_SDK_FALLBACK(0/1, 默认 0),
+//     REGION: { PT1_X..PT4_Y }
+//   }
 //
-// === 防撞 - 4 路相机 ===
-//   "CAMx_IP"           string  必填,  x = 1..4
-//   "CAMx_PORT"         int     可选, 默认 DEFAULT_PORT
-//   "CAMx_USER"         string  可选, 默认 DEFAULT_USER
-//   "CAMx_PWD"          string  可选, 默认 DEFAULT_PWD
-//   "CAMx_CHANNEL"      int     默认 1
-//   "CAMx_PT1_X..PT4_Y" int     必填
-//
-// === 防吊起 - 检测器(LIFT_ 前缀) ===
-//   "LIFT_DETECTOR_MODEL_PATH"   string  必填
-//   "LIFT_DETECTOR_TASK"         string  推荐 "detect"
-//   "LIFT_DETECTOR_IMG_W/H"      int
-//   "LIFT_DETECTOR_CONF/NMS"     float
-//   "LIFT_DETECTOR_CLASSES"      string  逗号分隔, 必填(类名含 hole/wheel 用作判定关键词)
-//   "LIFT_DETECTOR_USE_CUDA/CUDA_ID"
-//
-// === 防吊起 - 阈值 ===
-//   "LIFT_LIMIT_HOLE_Y"            int  锁孔垂直位移阈值
-//   "LIFT_LIMIT_WHEEL_Y"           int  车轮垂直位移阈值
-//   "LIFT_LIMIT_HORIZON_LEFT"      int  水平开走阈值
-//   "LIFT_LIMIT_ROTATE_LIFT_PLT"   int  车架侧翻阈值
-//   "LIFT_LIMIT_ROTATE_LIFT_WHEEL" int  车轮侧翻阈值
-//
-// === 防吊起 - 录像 ===
-//   "LIFT_ENABLE_RECORD"   int     0/1, 默认 1
-//   "LIFT_RECORD_FPS"      int     默认 10
-//   "LIFT_RECORD_DIR"      string  默认 "./save_log/lift_record/"
-//
-// === 防吊起 - 2 路相机 ===
-//   "LIFT_CAMx_IP/_PORT/_USER/_PWD/_CHANNEL/_RTSP_URL"   (x = 1..2)
+// === ANTI_LIFT ===
+//   DETECTOR: 同上(默认 TASK="detect")
+//   ALGO_LIMIT: { HOLE_Y, WHEEL_Y, HORIZON_LEFT, ROTATE_LIFT_PLT, ROTATE_LIFT_WHEEL }
+//   PLC_LIMIT:  { HOIST_POSITION, TROLLEY_POSITION }
+//   RECORD: { ENABLE(0/1), FPS, DIR }
+//   DEBUG_SHOW(0/1), INTERVAL
+//   CAM1..CAM2: {
+//     IP(必填), PORT, USER, PWD, CHANNEL,
+//     RTSP_URL(可选, 留空按海康主码流自动拼),
+//     SUPPORT_PAN_TILT, SUPPORT_ZOOM, ENABLE_SDK_FALLBACK
+//   }
 // -------------------------------------------------------------------------
 
 
@@ -109,16 +98,8 @@ struct AppBundleConfig {
 //     out        [输出] 解析结果
 // 返回:
 //     true   解析成功
-//     false  必填项缺失或文件无法打开; stderr 输出失败原因
+//     false  必填项缺失或文件无法打开; LOG_COMMON 输出失败原因
 // 阻塞: 同步, 仅 IO 时间
-//
-// 必填项校验:
-//     - 防撞 (若启用): DETECTOR_MODEL_PATH, DETECTOR_CLASSES, 4 路 CAM
-//     - 防吊起 (若启用): LIFT_DETECTOR_MODEL_PATH, LIFT_DETECTOR_CLASSES, 2 路 LIFT_CAM
-//
-// 用法:
-//     AppBundleConfig cfg;
-//     if (!LoadConfigFromJson("./config.json", cfg)) return 1;
 // =========================================================================
 bool LoadConfigFromJson(const std::string& json_path, AppBundleConfig& out);
 
@@ -129,4 +110,4 @@ bool LoadConfigFromJson(const std::string& json_path, AppBundleConfig& out);
 // 旧的 main / 单元测试代码不用改.
 // =========================================================================
 bool LoadConfigFromJson(const std::string& json_path,
-                        AntiCollisionAppConfig& out_cfg);
+    AntiCollisionAppConfig& out_cfg);

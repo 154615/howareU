@@ -64,6 +64,10 @@ bool AntiCollisionApp::Configure(const AntiCollisionAppConfig& cfg,
         s_cfg.user = cfg.cameras[i].user;
         s_cfg.pwd = cfg.cameras[i].pwd;
         s_cfg.channel = cfg.cameras[i].channel;
+        s_cfg.rtsp_url = cfg.cameras[i].rtsp_url;
+        s_cfg.support_pan_tilt = cfg.cameras[i].support_pan_tilt;
+        s_cfg.support_zoom = cfg.cameras[i].support_zoom;
+        s_cfg.enable_sdk_fallback = cfg.cameras[i].enable_sdk_fallback;
         s_cfg.cam_index = i;
         s_cfg.poll_interval_ms = cfg.poll_interval_ms;
         s_cfg.reconnect_interval_ms = cfg.reconnect_interval_ms;

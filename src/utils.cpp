@@ -32,100 +32,135 @@ void Log_no_date(std::string s) {
     WriteLogChannel(LogChannel::Common, s);
 }
 
+// =========================================================================
+// 新接口: 节点式 JSON 读取
+// =========================================================================
+
+bool LoadJsonFile(const std::string& json_path, Json::Value& root) {
+    std::ifstream in(json_path, std::ios::binary);
+    if (!in.is_open()) {
+        LOG_COMMON("[utils] LoadJsonFile: 无法打开 " << json_path);
+        return false;
+    }
+    Json::CharReaderBuilder builder;
+    // 关键: 允许注释. 业务 json 里有大量 // 注释, 必须开
+    builder["allowComments"] = true;
+    builder["collectComments"] = false;
+
+    std::string errs;
+    Json::Value tmp;
+    bool ok = Json::parseFromStream(builder, in, &tmp, &errs);
+    in.close();
+    if (!ok) {
+        LOG_COMMON("[utils] LoadJsonFile: parse 失败 " << json_path << " : " << errs);
+        return false;
+    }
+    root = std::move(tmp);
+    return true;
+}
+
+bool HasMember(const Json::Value& node, const std::string& key) {
+    return node.isObject() && node.isMember(key);
+}
+
+std::string GetJsonString(const Json::Value& node,
+    const std::string& key,
+    const std::string& def_value) {
+    if (!HasMember(node, key)) return def_value;
+    const Json::Value& v = node[key];
+    if (!v.isString()) return def_value;
+    return v.asString();
+}
+
+int GetJsonInt(const Json::Value& node,
+    const std::string& key,
+    int def_value) {
+    if (!HasMember(node, key)) return def_value;
+    const Json::Value& v = node[key];
+    // 允许 int / uint / 布尔, 不允许字符串 → 避免静默吃下错填的字符串
+    if (v.isIntegral()) return v.asInt();
+    if (v.isBool())     return v.asBool() ? 1 : 0;
+    return def_value;
+}
+
+float GetJsonFloat(const Json::Value& node,
+    const std::string& key,
+    float def_value) {
+    if (!HasMember(node, key)) return def_value;
+    const Json::Value& v = node[key];
+    if (v.isNumeric()) return v.asFloat();
+    return def_value;
+}
+
+bool GetJsonBool(const Json::Value& node,
+    const std::string& key,
+    bool def_value) {
+    if (!HasMember(node, key)) return def_value;
+    const Json::Value& v = node[key];
+    if (v.isBool())     return v.asBool();
+    if (v.isIntegral()) return v.asInt() != 0;
+    return def_value;
+}
+
+// =========================================================================
+// 旧接口(兼容层): 转发到新接口
+// =========================================================================
+// 注: 这几个函数每次调用都会重新打开文件 + 解析整棵树, 性能不如新接口.
+//     新代码请用 LoadJsonFile + Get*. 这里只保留兼容.
+//
+// 还原旧行为时有两个细节:
+//   - 老的 root_name 是顶层 key, 因此查的是 root[root_name]
+//   - 旧版打开失败时返回 "0" / 0; 这里保留同样的语义
+// =========================================================================
+
 std::string read_String_Json(std::string json_file, std::string root_name)
 {
-    Json::Reader reader;
     Json::Value root;
-    std::string name;
-
-    //从文件中读取，保证当前文件有demo.json文件  
-    std::ifstream in(json_file, std::ios::binary);
-
-    if (!in.is_open())
-    {
-        LOG_COMMON("[utils] Error opening file");
+    if (!LoadJsonFile(json_file, root)) {
         return "0";
     }
-    //读取根节点信息
-    if (reader.parse(in, root))
-        name = root[root_name].asString();
-    else
-        LOG_COMMON("[utils] parse error");
-    in.close();
-    return name;
+    if (!HasMember(root, root_name)) return "";
+    const Json::Value& v = root[root_name];
+    if (!v.isString()) return "";
+    return v.asString();
 }
 
 int read_Int_Json(std::string json_file, std::string root_name)
 {
-    Json::Reader reader;
     Json::Value root;
-    int data = 0;
-
-    //从文件中读取，保证当前文件有demo.json文件  
-    std::ifstream in(json_file, std::ios::binary);
-
-    if (!in.is_open())
-    {
-        LOG_COMMON("[utils] Error opening file");
+    if (!LoadJsonFile(json_file, root)) {
         return 0;
     }
-    //读取根节点信息
-    if (reader.parse(in, root))
-        data = root[root_name].asInt();
-    else
-        LOG_COMMON("[utils] parse error");
-
-    in.close();
-    return data;
+    return GetJsonInt(root, root_name, 0);
 }
 
 float read_Float_Json(std::string json_file, std::string root_name)
 {
-    Json::Reader reader;
     Json::Value root;
-    float data = 0;
-
-    //从文件中读取，保证当前文件有json文件  
-    std::ifstream in(json_file, std::ios::binary);
-
-    if (!in.is_open())
-    {
-        LOG_COMMON("[utils] Error opening file");
+    if (!LoadJsonFile(json_file, root)) {
         return 0;
     }
-    //读取根节点信息
-    if (reader.parse(in, root))
-        data = root[root_name].asFloat();
-    else
-        LOG_COMMON("[utils] parse error");
-
-    in.close();
-    return data;
+    return GetJsonFloat(root, root_name, 0.0f);
 }
 
 void write_Float_Json(std::string jsonFileName, std::string root_name, std::string root_name2, float data)
 {
-    // 读打开文件
-    std::ifstream jsonFile(jsonFileName, std::ios::binary);
+    // 读
     Json::Value jsonInfo;
-    if (!jsonFile.is_open())
-    {
-        LOG_COMMON("[utils] File open error.");
+    if (!LoadJsonFile(jsonFileName, jsonInfo)) {
         return;
     }
-    else
-    {
-        // 读取保存到json value
-        Json::Reader reader;
-        reader.parse(jsonFile, jsonInfo);
-        jsonFile.close();
-        // 写打开文件，修改json value，写入保存，关闭
-        std::ofstream jsonFile(jsonFileName, std::ios::out);
-        jsonInfo[root_name][root_name2] = Json::Value(data);
-        Json::StyledWriter sw;
-        jsonFile << sw.write(jsonInfo);
-        jsonFile.close();
+    // 改
+    jsonInfo[root_name][root_name2] = Json::Value(data);
+    // 写
+    std::ofstream jsonFile(jsonFileName, std::ios::out);
+    if (!jsonFile.is_open()) {
+        LOG_COMMON("[utils] write_Float_Json: 无法打开写入 " << jsonFileName);
+        return;
     }
+    Json::StyledWriter sw;
+    jsonFile << sw.write(jsonInfo);
+    jsonFile.close();
 }
 
 

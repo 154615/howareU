@@ -50,9 +50,15 @@ struct AntiLiftCameraEntry {
     std::string ip;                 // 设备 IP
     int         port = 8000;
     std::string user = "admin";
-    std::string pwd;                // 必填
+    std::string pwd;                // 若 SDK 全部禁用可留空
     int         channel = 1;
     std::string rtsp_url;           // 可选; 留空则按海康主码流自动拼
+
+    // ===== 海康 SDK 用途开关(每路相机独立) =====
+    // 透传给 CameraSourceConfig. 三者全 false 时本路完全不登录海康 SDK.
+    bool        support_pan_tilt = false;
+    bool        support_zoom = false;
+    bool        enable_sdk_fallback = false;
 };
 
 

@@ -51,27 +51,42 @@ namespace {
 
     // =========================================================================
     // 海康 PTZ 适配器
+    // -------------------------------------------------------------------------
+    // 与底层 HikvisionCamera 的区别:
+    //   HikvisionCamera 本身永远"理论上能转能变焦"; 但物理相机不一定支持(枪机
+    //   就只能变焦不能转, 半球机两者都不支持). 因此这一层加了 has_pan_/has_zoom_
+    //   两个开关, 由 CameraSource 在构造时按 cfg 透传进来:
+    //     - HasPan()/HasZoom() 直接返回开关值
+    //     - Move/MoveTo/Zoom 在对应开关为 false 时直接返回 false,
+    //       不会向 SDK 下发指令(避免在不支持的相机上发命令导致 SDK 报错)
     // =========================================================================
     class HikvisionPtzAdapter : public IPtzControl {
     public:
-        explicit HikvisionPtzAdapter(HikvisionCamera* cam) : cam_(cam) {}
+        HikvisionPtzAdapter(HikvisionCamera* cam, bool has_pan, bool has_zoom)
+            : cam_(cam), has_pan_(has_pan), has_zoom_(has_zoom) {
+        }
 
-        bool HasPan()  const override { return true; }
-        bool HasZoom() const override { return true; }
+        bool HasPan()  const override { return has_pan_; }
+        bool HasZoom() const override { return has_zoom_; }
 
         bool Move(float pan_deg, float tilt_deg) override {
-            return cam_ ? cam_->setRelativeAngle(pan_deg, tilt_deg) : false;
+            if (!has_pan_ || !cam_) return false;
+            return cam_->setRelativeAngle(pan_deg, tilt_deg);
         }
         bool MoveTo(float pan_deg, float tilt_deg) override {
-            return cam_ ? cam_->setAbsoluteAngle(pan_deg, tilt_deg) : false;
+            if (!has_pan_ || !cam_) return false;
+            return cam_->setAbsoluteAngle(pan_deg, tilt_deg);
         }
         bool Zoom(float multiplier) override {
-            return cam_ ? cam_->setAbsoluteZoom(multiplier) : false;
+            if (!has_zoom_ || !cam_) return false;
+            return cam_->setAbsoluteZoom(multiplier);
         }
         void StopAll() override { if (cam_) cam_->stopAllActions(); }
 
     private:
         HikvisionCamera* cam_;
+        bool             has_pan_;
+        bool             has_zoom_;
     };
 
     using Clock = std::chrono::steady_clock;
@@ -105,7 +120,7 @@ struct CameraSource::Impl {
     Impl() {
         gpu_stream = std::make_unique<RtspGpuStream>();
         camera = std::make_unique<HikvisionCamera>();
-        ptz = std::make_unique<HikvisionPtzAdapter>(camera.get());
+        // ptz 在 CameraSource 构造时按 cfg 建; 这里不建, 因为这里看不到 cfg.
     }
 };
 
@@ -117,6 +132,14 @@ CameraSource::CameraSource(const CameraSourceConfig& cfg)
     if (cfg_.poll_interval_ms <= 0) cfg_.poll_interval_ms = 33;
     if (cfg_.rtsp_url.empty()) {
         cfg_.rtsp_url = BuildHikRtspUrl(cfg_.user, cfg_.pwd, cfg_.ip, cfg_.channel);
+    }
+    // 只要支持 pan_tilt 或 zoom 中的任一项就给上层一个 IPtzControl;
+    // 全不支持就保持 ptz==nullptr, Ptz() 自然返回 nullptr.
+    if (cfg_.support_pan_tilt || cfg_.support_zoom) {
+        impl_->ptz = std::make_unique<HikvisionPtzAdapter>(
+            impl_->camera.get(),
+            cfg_.support_pan_tilt,
+            cfg_.support_zoom);
     }
 }
 
@@ -176,7 +199,13 @@ void CameraSource::Start() {
     }
     if (cfg_.auto_connect) want_connected_.store(true);
 
-    poll_thread_ = std::thread([this] {
+    // 是否需要登录海康 SDK: 任一 PTZ 能力 或 软解兜底 开启 → 必须登录;
+    // 三者全关时彻底不碰 SDK, 走纯 GPU 通用 RTSP 模式.
+    const bool needs_sdk_login = cfg_.support_pan_tilt
+        || cfg_.support_zoom
+        || cfg_.enable_sdk_fallback;
+
+    poll_thread_ = std::thread([this, needs_sdk_login] {
         cv::Mat frame;
 
         while (is_running_.load()) {
@@ -188,7 +217,7 @@ void CameraSource::Start() {
             if (!want && (gpu_alive || sdk_logged_in)) {
                 LOG_COMMON("[CameraSource cam" << cfg_.cam_index << "] 主动断开");
                 impl_->gpu_stream->Close();
-                impl_->camera->disconnect();
+                if (sdk_logged_in) impl_->camera->disconnect();
                 impl_->sdk_fallback = false;
                 std::this_thread::sleep_for(
                     std::chrono::milliseconds(cfg_.poll_interval_ms));
@@ -196,10 +225,15 @@ void CameraSource::Start() {
             }
 
             // ====== 2) 想连但还没建立任何连接 → 首次连接 ======
-            // 判据: 海康 SDK 没登录(isRealPlaying 是 m_realPlayHandle>=0,
-            //       但 only_login 模式下我们另判 userID), 用 isStreamConnected+isRealPlaying
-            //       不够, 这里就以 gpu_alive==false 且 sdk_logged_in==false 作为"没连"
-            if (want && !gpu_alive && !sdk_logged_in) {
+            // 判据:
+            //   - 不需要 SDK: gpu_alive==false 即视为未连
+            //   - 需要 SDK : gpu_alive==false 且 sdk_logged_in==false 才视为未连
+            //                (任一已就绪都先进取帧分支, 让另一个在状态机里慢慢补)
+            const bool not_connected_yet =
+                needs_sdk_login ? (!gpu_alive && !sdk_logged_in)
+                : (!gpu_alive);
+
+            if (want && not_connected_yet) {
                 auto now = Clock::now();
                 auto elapsed_ms =
                     std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -213,22 +247,38 @@ void CameraSource::Start() {
 
                 LOG_COMMON("[CameraSource cam" << cfg_.cam_index
                     << "] 尝试连接 GPU=" << cfg_.rtsp_url
-                    << " | SDK=" << cfg_.ip << ":" << cfg_.port
-                    << " ch=" << cfg_.channel);
+                    << (needs_sdk_login
+                        ? (std::string(" | SDK=") + cfg_.ip + ":"
+                            + std::to_string(cfg_.port)
+                            + " ch=" + std::to_string(cfg_.channel))
+                        : std::string(" | SDK=disabled"))
+                    << " (pan_tilt=" << (cfg_.support_pan_tilt ? 1 : 0)
+                    << " zoom=" << (cfg_.support_zoom ? 1 : 0)
+                    << " fallback=" << (cfg_.enable_sdk_fallback ? 1 : 0) << ")");
 
-                // a) 海康 SDK 仅登录 (PTZ 通道 + 兜底备用), 不开 RealPlay
-                bool sdk_ok = impl_->camera->connect(
-                    cfg_.ip, cfg_.port, cfg_.user, cfg_.pwd, cfg_.channel,
-                    /*only_login=*/true);
+                // a) 海康 SDK 登录(仅当 PTZ 或 软解兜底 启用时)
+                bool sdk_ok = true;   // 不需要时记为 true, 不影响后续日志判断
+                if (needs_sdk_login) {
+                    sdk_ok = impl_->camera->connect(
+                        cfg_.ip, cfg_.port, cfg_.user, cfg_.pwd, cfg_.channel,
+                        /*only_login=*/true);
+                }
 
-                // b) GPU 拉流
+                // b) GPU 拉流(无论 SDK 是否登录都拉)
                 bool gpu_ok = impl_->gpu_stream->Open(cfg_.rtsp_url, cfg_.gpu_device);
                 impl_->gpu_open_time = Clock::now();
                 impl_->sdk_fallback = false;
 
-                LOG_COMMON("[CameraSource cam" << cfg_.cam_index
-                    << "] SDK login=" << (sdk_ok ? "OK" : "FAIL")
-                    << " | GPU stream=" << (gpu_ok ? "OK" : "FAIL"));
+                if (needs_sdk_login) {
+                    LOG_COMMON("[CameraSource cam" << cfg_.cam_index
+                        << "] SDK login=" << (sdk_ok ? "OK" : "FAIL")
+                        << " | GPU stream=" << (gpu_ok ? "OK" : "FAIL"));
+                }
+                else {
+                    LOG_COMMON("[CameraSource cam" << cfg_.cam_index
+                        << "] GPU stream=" << (gpu_ok ? "OK" : "FAIL")
+                        << " (SDK 跳过)");
+                }
 
                 std::this_thread::sleep_for(
                     std::chrono::milliseconds(cfg_.poll_interval_ms));
@@ -245,21 +295,37 @@ void CameraSource::Start() {
                 if (IsGpuStale(*impl_->gpu_stream, impl_->gpu_open_time,
                     cfg_.gpu_cold_start_grace_ms,
                     cfg_.gpu_stale_threshold_ms)) {
-                    LOG_COMMON("[CameraSource cam" << cfg_.cam_index
-                        << "] GPU 流不健康 ("
-                        << (impl_->gpu_stream->HasEverProduced()
-                            ? std::to_string(impl_->gpu_stream->MillisSinceLastFrame()) + "ms 无新帧"
-                            : std::to_string(cfg_.gpu_cold_start_grace_ms) + "ms 内无首帧")
-                        << "), 切换到 SDK 软解兜底");
 
-                    impl_->gpu_stream->Close();
-                    if (impl_->camera->startRealPlay()) {
-                        impl_->sdk_fallback = true;
-                        impl_->last_recover_attempt = Clock::now();
+                    const std::string reason =
+                        impl_->gpu_stream->HasEverProduced()
+                        ? std::to_string(impl_->gpu_stream->MillisSinceLastFrame()) + "ms 无新帧"
+                        : std::to_string(cfg_.gpu_cold_start_grace_ms) + "ms 内无首帧";
+
+                    if (cfg_.enable_sdk_fallback) {
+                        // 走 SDK 软解兜底
+                        LOG_COMMON("[CameraSource cam" << cfg_.cam_index
+                            << "] GPU 流不健康 (" << reason
+                            << "), 切换到 SDK 软解兜底");
+
+                        impl_->gpu_stream->Close();
+                        if (impl_->camera->startRealPlay()) {
+                            impl_->sdk_fallback = true;
+                            impl_->last_recover_attempt = Clock::now();
+                        }
+                        else {
+                            LOG_COMMON("[CameraSource cam" << cfg_.cam_index
+                                << "] SDK 软解启动失败, 下轮再试");
+                        }
                     }
                     else {
+                        // 未启用兜底: 关掉 GPU, 让首连分支重开 GPU
+                        // (不打 SDK, 也不持续刷日志 —— 关掉后 IsGpuStale 不再成立)
                         LOG_COMMON("[CameraSource cam" << cfg_.cam_index
-                            << "] SDK 软解启动失败, 下轮再试");
+                            << "] GPU 流不健康 (" << reason
+                            << "), 未启用 SDK 兜底, 重开 GPU 解码器");
+                        impl_->gpu_stream->Close();
+                        // 注: 下个循环 gpu_alive==false 会走首连分支重开;
+                        //     reconnect_interval_ms 节流防止疯狂重试.
                     }
                 }
             }
@@ -324,7 +390,7 @@ void CameraSource::Stop() {
     if (poll_thread_.joinable()) poll_thread_.join();
 
     impl_->gpu_stream->Close();
-    impl_->camera->disconnect();
+    if (impl_->camera->isLoggedIn()) impl_->camera->disconnect();
     LOG_COMMON("[CameraSource cam" << cfg_.cam_index << "] 已停止");
 }
 
