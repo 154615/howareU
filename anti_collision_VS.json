@@ -1,0 +1,201 @@
+{
+  // ============================================================
+  // COMMON: 全局开关 + 共享配置(PLC, 相机凭证)
+  // ============================================================
+  "COMMON": {
+    // ---- App 总开关 ----
+    "ENABLE_ANTI_COLLISION": 1, // 是否启动防撞 App
+    "ENABLE_ANTI_LIFT": 1, // 是否启动防吊起 App
+
+    // ---- PLC 通讯 ----
+    "PLC": {
+      "ENABLE": 1, // 是否启用 PLC 通讯线程
+      "RCV_IP": "10.141.10.28",
+      "SEND_IP": "127.0.0.1",
+      "RCV_INTERVAL_MS": 50,
+      "SEND_INTERVAL_MS": 50
+    },
+
+    // ---- 共享相机凭证 ----
+    // 单路相机如果不填 USER/PWD/PORT, 会回落到这里.
+    "DEFAULT_CAMERA": {
+      "USER": "admin",
+      "PWD": "Hc@RTG210",
+      "PORT": 8000
+    }
+  },
+
+  // ============================================================
+  // ANTI_COLLISION: 防撞 App 配置
+  // ============================================================
+  "ANTI_COLLISION": {
+    // ---- 检测器 ----
+    "DETECTOR": {
+      "MODEL_PATH": "./model/anti_collsion_0505.onnx",
+      "CLASSES": "car, person, truck,crane,traffic_Cone,truck_pallet,truck_container,obj_1,obj_4",
+      "TASK": "seg", // "detect" 或 "seg"
+      "IMG_W": 640,
+      "IMG_H": 640,
+      "CONF": 0.25,
+      "NMS": 0.7,
+      "MASK": 0.8, // 仅 seg 任务用
+      "USE_CUDA": 1,
+      "CUDA_ID": 0
+    },
+
+    // ---- 业务参数 ----
+    "BUSINESS": {
+      "SPLIT_RATIO": 0.5, // 减速区/急停区上下切分比例
+      "MAX_RETAIN_DAYS": 7, // 截图保留天数
+      "DEBUG_SHOW": 0, // 桌面调试 cv::imshow
+      "INTERVAL": 33, // poll 节拍 ms
+      "RES_X": 1920, // 相机出图分辨率宽
+      "RES_Y": 1080, // 相机出图分辨率高
+      "PLC_PUBLISH_INTERVAL_MS": 100 // 防撞结果写 PLC 频率
+    },
+
+    // ---- 4 路相机(分别为海左/海右/陆左/陆右) ----
+    // 每路相机现可独立配置:
+    //   SUPPORT_PAN_TILT    是否支持云台旋转(0/1)
+    //   SUPPORT_ZOOM        是否支持光学变焦(0/1)
+    //   ENABLE_SDK_FALLBACK GPU 解码失败时是否切到 SDK 软解(0/1)
+    // 三者全 0 时本路不登录海康 SDK, 节省一份登录开销.
+    "CAM1": {
+      "IP": "10.141.10.137",
+      "CHANNEL": 1,
+      "RTSP_URL": "rtsp://admin:Hc@RTG210@10.141.10.137:554/h264/ch1/main/av_stream",
+      "SUPPORT_PAN_TILT": 0,
+      "SUPPORT_ZOOM": 0,
+      "ENABLE_SDK_FALLBACK": 1,
+      "REGION": {
+        "PT1_X": 855,
+        "PT1_Y": 199,
+        "PT2_X": 960,
+        "PT2_Y": 203,
+        "PT3_X": 1300,
+        "PT3_Y": 1080,
+        "PT4_X": 565,
+        "PT4_Y": 1080
+      }
+    },
+    "CAM2": {
+      "IP": "10.141.10.138",
+      "CHANNEL": 1,
+      "RTSP_URL": "rtsp://admin:Hc@RTG210@10.141.10.138:554/h264/ch1/main/av_stream",
+      "SUPPORT_PAN_TILT": 0,
+      "SUPPORT_ZOOM": 0,
+      "ENABLE_SDK_FALLBACK": 1,
+      "REGION": {
+        "PT1_X": 820,
+        "PT1_Y": 209,
+        "PT2_X": 1005,
+        "PT2_Y": 209,
+        "PT3_X": 1220,
+        "PT3_Y": 1080,
+        "PT4_X": 513,
+        "PT4_Y": 1080
+      }
+    },
+    "CAM3": {
+      "IP": "10.141.10.139",
+      "CHANNEL": 1,
+      "RTSP_URL": "rtsp://admin:Hc@RTG210@10.141.10.139:554/h264/ch1/main/av_stream",
+      "SUPPORT_PAN_TILT": 0,
+      "SUPPORT_ZOOM": 0,
+      "ENABLE_SDK_FALLBACK": 1,
+      "REGION": {
+        "PT1_X": 773,
+        "PT1_Y": 209,
+        "PT2_X": 927,
+        "PT2_Y": 209,
+        "PT3_X": 1202,
+        "PT3_Y": 1080,
+        "PT4_X": 503,
+        "PT4_Y": 1080
+      }
+    },
+    "CAM4": {
+      "IP": "10.141.10.140",
+      "CHANNEL": 1,
+      "RTSP_URL": "rtsp://admin:Hc@RTG210@10.141.10.140:554/h264/ch1/main/av_stream",
+      "SUPPORT_PAN_TILT": 0,
+      "SUPPORT_ZOOM": 0,
+      "ENABLE_SDK_FALLBACK": 1,
+      "REGION": {
+        "PT1_X": 927,
+        "PT1_Y": 177,
+        "PT2_X": 1101,
+        "PT2_Y": 177,
+        "PT3_X": 1405,
+        "PT3_Y": 1080,
+        "PT4_X": 595,
+        "PT4_Y": 1080
+      }
+    }
+  },
+
+  // ============================================================
+  // ANTI_LIFT: 防吊起 App 配置
+  // ============================================================
+  "ANTI_LIFT": {
+    // ---- 检测器 ----
+    "DETECTOR": {
+      "MODEL_PATH": "./model/anti_lift_1119.onnx.onnx",
+      "CLASSES": "wheel,hole",
+      "TASK": "detect",
+      "IMG_W": 640,
+      "IMG_H": 640,
+      "CONF": 0.25,
+      "NMS": 0.45,
+      "USE_CUDA": 1,
+      "CUDA_ID": 0
+    },
+
+    // ---- 异常判定阈值(像素位移) ----
+    "ALGO_LIMIT": {
+      "HOLE_Y": 100, // 锁孔垂直位移上限
+      "WHEEL_Y": 100, // 车轮垂直位移上限
+      "HORIZON_LEFT": 200, // 水平开走判据
+      "ROTATE_LIFT_PLT": 80, // 车架侧翻判据
+      "ROTATE_LIFT_WHEEL": 60 // 车轮侧翻判据
+    },
+
+    // ---- 启停判定阈值(PLC 语义) ----
+    "PLC_LIMIT": {
+      "HOIST_POSITION": 600, // 起升超过此值视为升出检测区
+      "TROLLEY_POSITION": 100 // 小车小于此值才允许启动会话
+    },
+
+    // ---- 录像 ----
+    "RECORD": {
+      "ENABLE": 1,
+      "FPS": 10,
+      "DIR": "./save_log/lift_record/"
+    },
+
+    // ---- 调试 ----
+    "DEBUG_SHOW": 0,
+
+    // ---- 取流节拍 ----
+    "INTERVAL": 33,
+
+    // ---- 2 路相机 ----
+    // 字段含义同 ANTI_COLLISION.CAMx
+    "CAM1": {
+      "IP": "10.141.10.108",
+      "CHANNEL": 1,
+      "RTSP_URL": "rtsp://admin:Hc@RTG210@10.141.10.108:554/h264/ch1/main/av_stream",
+      "SUPPORT_PAN_TILT": 0,
+      "SUPPORT_ZOOM": 0,
+      "ENABLE_SDK_FALLBACK": 1
+    },
+    "CAM2": {
+      "IP": "10.141.10.109",
+      "CHANNEL": 1,
+      "RTSP_URL": "rtsp://admin:Hc@RTG210@10.141.10.109:554/h264/ch1/main/av_stream",
+      "SUPPORT_PAN_TILT": 0,
+      "SUPPORT_ZOOM": 0,
+      "ENABLE_SDK_FALLBACK": 1
+    }
+  }
+}
