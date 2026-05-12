@@ -171,17 +171,26 @@ void CameraSource::RemoveSink(FrameSink* sink) {
 // =========================================================================
 namespace {
 
-    // GPU 流是否处于"应该认为它挂了"的状态
-    // - 冷启动期 (Open 后还没出过首帧) 内只要不超过 grace_ms 都算正常
-    // - 出过首帧后, 超过 stale_threshold_ms 没新帧就算挂
-    bool IsGpuStale(const RtspGpuStream& gpu,
+    // GPU 流是否处于"运行中变 stale"的状态.
+    // 仅对"已出过首帧、但最近 stale_threshold_ms 没新帧"返回 true.
+    // 冷启动期(还没出首帧)一律返回 false —— RtspGpuStream 内部的 worker
+    // 自己会重试 createVideoReader, 外层不要插手, 否则会陷入
+    //   "Open → 等几秒 → 误判 stale → Close 重开 → 又从头握手"
+    // 的死循环.
+    bool IsGpuRunningStale(const RtspGpuStream& gpu, int stale_threshold_ms) {
+        if (!gpu.HasEverProduced()) return false;
+        return gpu.MillisSinceLastFrame() > stale_threshold_ms;
+    }
+
+    // 冷启动超长判据(仅 SDK 兜底场景下有意义):
+    //   已经 Open 超过 grace_ms 还没出过首帧 → 视为 GPU 起不来,
+    //   值得切到 SDK 软解兜底.
+    // 对未启用兜底的相机不应使用此判据.
+    bool IsGpuColdStartTimedOut(const RtspGpuStream& gpu,
         Clock::time_point gpu_open_time,
-        int grace_ms,
-        int stale_threshold_ms) {
-        if (gpu.HasEverProduced()) {
-            return gpu.MillisSinceLastFrame() > stale_threshold_ms;
-        }
-        // 还没出首帧
+        int grace_ms) {
+        if (gpu.HasEverProduced()) return false;
+        if (gpu_open_time == Clock::time_point{}) return false;
         auto since_open_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
             Clock::now() - gpu_open_time).count();
         return since_open_ms > grace_ms;
@@ -214,10 +223,16 @@ void CameraSource::Start() {
             const bool gpu_alive = impl_->gpu_stream->IsStreamConnected();
 
             // ====== 1) 主动断开 ======
-            if (!want && (gpu_alive || sdk_logged_in)) {
+            // 这里也不能只看 gpu_alive: 冷启动期 worker 已经在跑但还没出首帧,
+            // 此时 gpu_alive==false 但 RtspGpuStream 内部 is_running_ 已经是 true.
+            // 用 gpu_open_time 判断: 只要发起过 Open 就需要 Close.
+            const bool gpu_in_session =
+                impl_->gpu_open_time != Clock::time_point{};
+            if (!want && (gpu_in_session || sdk_logged_in)) {
                 LOG_COMMON("[CameraSource cam" << cfg_.cam_index << "] 主动断开");
                 impl_->gpu_stream->Close();
                 if (sdk_logged_in) impl_->camera->disconnect();
+                impl_->gpu_open_time = Clock::time_point{};  // 重置, 下次首连判据成立
                 impl_->sdk_fallback = false;
                 std::this_thread::sleep_for(
                     std::chrono::milliseconds(cfg_.poll_interval_ms));
@@ -225,13 +240,22 @@ void CameraSource::Start() {
             }
 
             // ====== 2) 想连但还没建立任何连接 → 首次连接 ======
-            // 判据:
-            //   - 不需要 SDK: gpu_alive==false 即视为未连
-            //   - 需要 SDK : gpu_alive==false 且 sdk_logged_in==false 才视为未连
-            //                (任一已就绪都先进取帧分支, 让另一个在状态机里慢慢补)
+            // 判据用"是否已经 Open 过 GPU 流", 而不是"GPU 是否在出帧":
+            //   - RtspGpuStream::Open() 是非阻塞的, 只起 worker 线程;
+            //     真正握手 + 创建 cudacodec 解码器在 worker 里, 通常 5-15s
+            //     才出首帧. IsStreamConnected() 在出首帧前一直是 false.
+            //   - 如果用 !gpu_alive 当判据, 冷启动这十几秒里每 reconnect_interval_ms
+            //     就会再触发一次 Open(), 被 RtspGpuStream 内部幂等拦下来,
+            //     徒增日志噪声, 而且这十几秒里取帧分支根本进不去.
+            //   - 真正的"GPU 流挂了"情形由取帧分支的 IsGpuRunningStale 处理,
+            //     那里会主动 Close() 并把 gpu_open_time 留待下次首连重置.
+            //
+            // gpu_open_time == epoch (默认值) ? "从未 Open 或已显式 Close",
+            // 是判断"该不该走首连"的可靠信号.
+            // (这里复用前面在"主动断开"判据里算过的 gpu_in_session.)
             const bool not_connected_yet =
-                needs_sdk_login ? (!gpu_alive && !sdk_logged_in)
-                : (!gpu_alive);
+                needs_sdk_login ? (!gpu_in_session && !sdk_logged_in)
+                : (!gpu_in_session);
 
             if (want && not_connected_yet) {
                 auto now = Clock::now();
@@ -292,22 +316,43 @@ void CameraSource::Start() {
                 // ---- GPU 主路径 ----
                 got = impl_->gpu_stream->GetLatestFrame(frame);
 
-                if (IsGpuStale(*impl_->gpu_stream, impl_->gpu_open_time,
-                    cfg_.gpu_cold_start_grace_ms,
-                    cfg_.gpu_stale_threshold_ms)) {
+                // 健康判定分两种, 处理路径完全不同:
+                //
+                //   (a) "运行中变 stale": 已经出过首帧, 之后超过 stale_threshold_ms
+                //       没新帧 → 流真的断了, 必须处理.
+                //         · 启用兜底 → 切 SDK 软解
+                //         · 未启用兜底 → Close+重置 gpu_open_time, 让首连分支重开
+                //
+                //   (b) "冷启动超时": 还没出过首帧, 但 Open 已经超过 grace_ms.
+                //       这个判据的本意是"GPU 起不来, 早点切 SDK", 因此只在
+                //       启用 SDK 兜底时才有意义. 未启用兜底的相机不应触发这条 —
+                //       那种场景下"冷启动慢"和"GPU 起不来"无法区分, 重开只会
+                //       让本来快要握手成功的 worker 从头来过, 适得其反.
+                //       RtspGpuStream 内部 worker 会自己 2s 重试 createVideoReader,
+                //       外层只需要静静等待.
+                const bool stale_running =
+                    IsGpuRunningStale(*impl_->gpu_stream,
+                        cfg_.gpu_stale_threshold_ms);
+                const bool cold_start_timeout =
+                    cfg_.enable_sdk_fallback
+                    && IsGpuColdStartTimedOut(*impl_->gpu_stream,
+                        impl_->gpu_open_time,
+                        cfg_.gpu_cold_start_grace_ms);
 
+                if (stale_running || cold_start_timeout) {
                     const std::string reason =
-                        impl_->gpu_stream->HasEverProduced()
+                        stale_running
                         ? std::to_string(impl_->gpu_stream->MillisSinceLastFrame()) + "ms 无新帧"
                         : std::to_string(cfg_.gpu_cold_start_grace_ms) + "ms 内无首帧";
 
                     if (cfg_.enable_sdk_fallback) {
-                        // 走 SDK 软解兜底
+                        // 走 SDK 软解兜底(stale_running 和 cold_start_timeout 都到这)
                         LOG_COMMON("[CameraSource cam" << cfg_.cam_index
                             << "] GPU 流不健康 (" << reason
                             << "), 切换到 SDK 软解兜底");
 
                         impl_->gpu_stream->Close();
+                        impl_->gpu_open_time = Clock::time_point{};
                         if (impl_->camera->startRealPlay()) {
                             impl_->sdk_fallback = true;
                             impl_->last_recover_attempt = Clock::now();
@@ -318,14 +363,14 @@ void CameraSource::Start() {
                         }
                     }
                     else {
-                        // 未启用兜底: 关掉 GPU, 让首连分支重开 GPU
-                        // (不打 SDK, 也不持续刷日志 —— 关掉后 IsGpuStale 不再成立)
+                        // 未启用兜底: 只有 stale_running 能到这分支
+                        // (cold_start_timeout 在上面已被 enable_sdk_fallback 短路)
                         LOG_COMMON("[CameraSource cam" << cfg_.cam_index
                             << "] GPU 流不健康 (" << reason
                             << "), 未启用 SDK 兜底, 重开 GPU 解码器");
                         impl_->gpu_stream->Close();
-                        // 注: 下个循环 gpu_alive==false 会走首连分支重开;
-                        //     reconnect_interval_ms 节流防止疯狂重试.
+                        impl_->gpu_open_time = Clock::time_point{};
+                        // reconnect_interval_ms 节流防止疯狂重试.
                     }
                 }
             }
@@ -363,6 +408,7 @@ void CameraSource::Start() {
                         LOG_COMMON("[CameraSource cam" << cfg_.cam_index
                             << "] GPU 恢复失败, 继续 SDK 软解");
                         impl_->gpu_stream->Close();
+                        impl_->gpu_open_time = Clock::time_point{};  // 探测失败, GPU 又脱手
                     }
                 }
             }

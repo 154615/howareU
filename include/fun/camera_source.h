@@ -96,9 +96,18 @@ struct CameraSourceConfig {
     bool        auto_connect = true;  // Start() 时是否自动建立连接
 
     // ===== GPU 解码健康度判据(基于时间, 不是次数) =====
-    // 冷启动期: GPU 流刚 Open 还没出首帧, 这段时间允许"无新帧", 不算失败
-    int         gpu_cold_start_grace_ms = 5000;
-    // 运行期: 已出过首帧后, 超过这个时间没新帧 → 触发回退到 SDK 软解
+    //
+    // 注意: 这两个判据的处理路径完全不同, 别混了:
+    //   - gpu_stale_threshold_ms: "已出过首帧, 但最近这么久没新帧" → 流真的断了,
+    //     无论是否启用兜底都要处理(启用兜底则切 SDK, 否则 Close+重开).
+    //   - gpu_cold_start_grace_ms: "Open 后这么久仍没出过首帧" → 仅供
+    //     SDK 兜底场景做"GPU 起不来, 早点切 SDK"的逃逸判定. 未启用兜底
+    //     时此值不生效 —— 让 RtspGpuStream 内部 worker 自己慢慢握手即可.
+    //
+    // 默认值选取依据: 你这套相机 + GPU codec 实测冷启动 5~12 秒;
+    // 30 秒留足余量, 又不至于让兜底切换体感太晚.
+    int         gpu_cold_start_grace_ms = 30000;
+    // 运行期: 已出过首帧后, 超过这个时间没新帧 → 视为流断了
     int         gpu_stale_threshold_ms = 500;
     // GPU 恢复探测间隔(兜底中, 每隔这个时间试一次重开 GPU)
     int         gpu_recover_probe_ms = 5000;
